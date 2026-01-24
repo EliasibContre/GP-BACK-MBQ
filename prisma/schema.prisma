@@ -1,0 +1,406 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                    Int                  @id @default(autoincrement())
+  email                 String               @unique
+  fullName              String
+  passwordHash          String
+  mustChangePassword    Boolean              @default(true)
+  isActive              Boolean              @default(true)
+  createdAt             DateTime             @default(now())
+  updatedAt             DateTime             @updatedAt
+  department            DepartmentType       @default(SIN_ASIGNAR)
+  phone                 String?
+  createdAccessRequests AccessRequest[]      @relation("AccessRequestCreatedUsers")
+  decidedAccessRequests AccessRequest[]      @relation("AccessRequestDecisions")
+  auditLogs             AuditLog[]
+  reviewedInvoices      Invoice[]            @relation("InvoiceReviewedBy")
+  loginCodes            LoginCode[]
+  notifications         Notification[]
+  passwordResetTokens   PasswordResetToken[]
+  inactivatedProviders  Provider[]           @relation("InactivatedProviders")
+  reviewedDocs          ProviderDocument[]   @relation("ReviewedByUser")
+  uploadedDocs          ProviderDocument[]   @relation("UploadedByUser")
+  approvedPOs           PurchaseOrder[]      @relation("POApprovedBy")
+  createdPOs            PurchaseOrder[]      @relation("POCreatedBy")
+  satImports            SatImport[]
+  roles                 UserRole[]
+}
+
+model Role {
+  id    Int        @id @default(autoincrement())
+  name  String     @unique
+  users UserRole[]
+}
+
+model UserRole {
+  userId Int
+  roleId Int
+  role   Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+}
+
+model LoginCode {
+  id        Int       @id @default(autoincrement())
+  userId    Int
+  code      String
+  expiresAt DateTime
+  usedAt    DateTime?
+  sentAt    DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+}
+
+model PasswordResetToken {
+  id        Int       @id @default(autoincrement())
+  userId    Int
+  token     String
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@index([token])
+}
+
+model Provider {
+  id                Int                   @id @default(autoincrement())
+  rfc               String                @unique
+  businessName      String
+  emailContacto     String?
+  telefono          String?
+  isApproved        Boolean               @default(false)
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+  contactPosition   String?
+  direccionFiscal   String?
+  inactivatedAt     DateTime?
+  inactivatedBy     Int?
+  inactiveReason    String?
+  isActive          Boolean               @default(true)
+  observaciones     String?
+  personType        PersonType?
+  invoices          Invoice[]
+  inactivatedByUser User?                 @relation("InactivatedProviders", fields: [inactivatedBy], references: [id])
+  bankAccounts      ProviderBankAccount[]
+  contacts          ProviderContact[]
+  documents         ProviderDocument[]
+  purchaseOrders    PurchaseOrder[]
+
+  @@index([businessName])
+  @@index([isActive])
+}
+
+model ProviderBankAccount {
+  id            Int      @id @default(autoincrement())
+  providerId    Int
+  bankName      String?
+  clabe         String?
+  accountNumber String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  provider      Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+
+  @@unique([providerId, clabe])
+}
+
+model ProviderContact {
+  id         Int      @id @default(autoincrement())
+  providerId Int
+  name       String
+  email      String?
+  phone      String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  provider   Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+}
+
+/// *
+/// * ===================== Documentos =====================
+model DocumentType {
+  id          Int                @id @default(autoincrement())
+  name        String             @unique
+  description String?
+  isRequired  Boolean            @default(false)
+  code        String             @unique
+  requiredFor PersonType[]       @default([])
+  documents   ProviderDocument[]
+}
+
+model ProviderDocument {
+  id             Int            @id @default(autoincrement())
+  providerId     Int
+  documentTypeId Int
+  status         DocumentStatus @default(PENDING)
+  fileUrl        String?
+  storageKey     String?
+  uploadedById   Int
+  reviewedById   Int?
+  notes          String?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+  documentType   DocumentType   @relation(fields: [documentTypeId], references: [id])
+  provider       Provider       @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  reviewedBy     User?          @relation("ReviewedByUser", fields: [reviewedById], references: [id])
+  uploadedBy     User           @relation("UploadedByUser", fields: [uploadedById], references: [id])
+
+  @@unique([providerId, documentTypeId])
+  @@index([providerId, status])
+}
+
+/// *
+/// * ========== Lista del SAT + Auditoría de cargas ==========
+model SatBlacklist {
+  id                   Int          @id @default(autoincrement())
+  rfc                  String       @unique
+  name                 String?
+  situation            SATSituation
+  presuncionOficioSat  String?
+  presuncionSatDate    DateTime?
+  presuncionOficioDof  String?
+  presuncionDofDate    DateTime?
+  desvirtuadoOficioSat String?
+  desvirtuadoSatDate   DateTime?
+  desvirtuadoOficioDof String?
+  desvirtuadoDofDate   DateTime?
+  definitivoOficioSat  String?
+  definitivoSatDate    DateTime?
+  definitivoOficioDof  String?
+  definitivoDofDate    DateTime?
+  sentenciaOficioSat   String?
+  sentenciaSatDate     DateTime?
+  sentenciaOficioDof   String?
+  sentenciaDofDate     DateTime?
+  loadedAt             DateTime     @default(now())
+
+  @@index([situation])
+}
+
+model SatImport {
+  id         Int      @id @default(autoincrement())
+  filename   String?
+  fileHash   String?
+  rows       Int
+  loadedById Int
+  createdAt  DateTime @default(now())
+  loadedBy   User     @relation(fields: [loadedById], references: [id])
+}
+
+/// *
+/// * ===================== Órdenes de compra, Facturas y Pagos =====================
+model PurchaseOrder {
+  id                   Int                 @id @default(autoincrement())
+  number               String              @unique
+  providerId           Int
+  status               PurchaseOrderStatus @default(DRAFT)
+  currency             String              @default("MXN")
+  subtotal             Decimal?            @db.Decimal(14, 2)
+  taxes                Decimal?            @db.Decimal(14, 2)
+  total                Decimal?            @db.Decimal(14, 2)
+  createdById          Int
+  approvedById         Int?
+  issuedAt             DateTime?
+  approvedAt           DateTime?
+  receivedAt           DateTime?
+  createdAt            DateTime            @default(now())
+  updatedAt            DateTime            @updatedAt
+  invoicePdfUrl        String?
+  invoiceStorageKey    String?
+  invoiceUploadedAt    DateTime?
+  invoiceXmlStorageKey String?
+  invoiceXmlUrl        String?
+  obervations          String?
+  pdfUrl               String?
+  storageKey           String?
+  invoices             Invoice[]
+  payments             Payment[]
+  approvedBy           User?               @relation("POApprovedBy", fields: [approvedById], references: [id])
+  createdBy            User                @relation("POCreatedBy", fields: [createdById], references: [id])
+  provider             Provider            @relation(fields: [providerId], references: [id])
+  items                PurchaseOrderItem[]
+
+  @@index([providerId, status])
+}
+
+model PurchaseOrderItem {
+  id              Int           @id @default(autoincrement())
+  purchaseOrderId Int
+  description     String
+  quantity        Decimal       @db.Decimal(14, 4)
+  unitPrice       Decimal       @db.Decimal(14, 2)
+  taxRate         Decimal?      @db.Decimal(5, 4)
+  lineTotal       Decimal?      @db.Decimal(14, 2)
+  purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+}
+
+model Invoice {
+  id              Int            @id @default(autoincrement())
+  number          String         @unique
+  providerId      Int
+  purchaseOrderId Int?
+  status          InvoiceStatus  @default(SUBMITTED)
+  currency        String         @default("MXN")
+  total           Decimal        @db.Decimal(14, 2)
+  dueDate         DateTime?
+  xmlUrl          String?
+  pdfUrl          String?
+  reviewedById    Int?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+  provider        Provider       @relation(fields: [providerId], references: [id])
+  purchaseOrder   PurchaseOrder? @relation(fields: [purchaseOrderId], references: [id])
+  reviewedBy      User?          @relation("InvoiceReviewedBy", fields: [reviewedById], references: [id])
+
+  @@index([providerId, status])
+}
+
+model Payment {
+  id              Int           @id @default(autoincrement())
+  amount          Decimal       @db.Decimal(14, 2)
+  paidAt          DateTime
+  method          PaymentMethod @default(TRANSFER)
+  reference       String?
+  createdAt       DateTime      @default(now())
+  purchaseOrderId Int
+  purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+
+  @@index([purchaseOrderId])
+}
+
+/// *
+/// * ===================== Auditoría =====================
+model AuditLog {
+  id        Int      @id @default(autoincrement())
+  actorId   Int?
+  action    String
+  entity    String
+  entityId  Int?
+  meta      Json?
+  createdAt DateTime @default(now())
+  actor     User?    @relation(fields: [actorId], references: [id])
+
+  @@index([entity, entityId])
+}
+
+model Notification {
+  id         Int       @id @default(autoincrement())
+  userId     Int
+  type       String
+  entityType String
+  entityId   Int
+  title      String
+  message    String
+  data       Json?
+  readAt     DateTime?
+  createdAt  DateTime  @default(now())
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt])
+}
+
+model AccessRequest {
+  id            Int                 @id @default(autoincrement())
+  kind          AccessRequestKind
+  personType    PersonType?
+  fullName      String?
+  companyName   String?
+  department    DepartmentType?
+  rfc           String?
+  email         String
+  status        AccessRequestStatus @default(PENDING)
+  notes         String?
+  decidedAt     DateTime?
+  decidedById   Int?
+  createdUserId Int?
+  createdAt     DateTime            @default(now())
+  createdUser   User?               @relation("AccessRequestCreatedUsers", fields: [createdUserId], references: [id])
+  decidedBy     User?               @relation("AccessRequestDecisions", fields: [decidedById], references: [id])
+
+  @@index([email, status])
+  @@index([status])
+}
+
+/// *
+/// * ===================== Seguridad & Accesos =====================
+enum DepartmentType {
+  SIN_ASIGNAR
+  RH
+  FINANZAS
+  COMPRAS
+  TI
+  VENTAS
+  MARKETING
+  OPERACIONES
+  LOGISTICA
+  CALIDAD
+  DIRECCION_GENERAL
+}
+
+enum PersonType {
+  FISICA
+  MORAL
+}
+
+/// *
+/// * ===================== Catálogos (listas de estados) =====================
+enum SATSituation {
+  PRESUNTO
+  DESVIRTUADO
+  DEFINITIVO
+  SENTENCIA_FAVORABLE
+}
+
+enum DocumentStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  EXPIRED
+}
+
+enum PurchaseOrderStatus {
+  DRAFT
+  SENT
+  RECEIVED
+  CANCELLED
+  CLOSED
+  APPROVED
+}
+
+enum InvoiceStatus {
+  SUBMITTED
+  UNDER_REVIEW
+  APPROVED
+  REJECTED
+  PAID
+}
+
+enum PaymentMethod {
+  TRANSFER
+  CASH
+  CARD
+  OTHER
+}
+
+/// *
+/// * ===================== Solicitudes de Acceso =====================
+enum AccessRequestKind {
+  INTERNAL
+  PROVIDER
+}
+
+enum AccessRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
