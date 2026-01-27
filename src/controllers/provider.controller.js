@@ -693,3 +693,114 @@ export async function updateMyProviderData(req, res, next) {
     res.status(500).json({ error: 'Error al actualizar los datos' });
   }
 }
+
+export async function getAdminProvidersTable(req, res, next) {
+  try {
+    const q = String(req.query.q || '').trim();
+
+    const providers = await prisma.provider.findMany({
+      where: {
+        isActive: true,
+        ...(q
+          ? {
+              OR: [
+                { businessName: { contains: q, mode: 'insensitive' } },
+                { rfc: { contains: q, mode: 'insensitive' } },
+              ],
+            }
+          : {}),
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 50,
+      select: {
+        id: true,
+        businessName: true,
+        rfc: true,
+        isActive: true,
+        isApproved: true,
+        personType: true,
+        observaciones: true,
+
+        // ✅ Facturas (Invoice)
+        invoices: {
+          orderBy: { createdAt: 'desc' },
+          take: 5,
+          select: {
+            id: true,
+            number: true,
+            pdfUrl: true,
+            createdAt: true,
+          },
+        },
+
+        // ✅ Órdenes de compra (PurchaseOrder)
+        purchaseOrders: {
+          orderBy: { createdAt: 'desc' },
+          take: 5,
+          select: {
+            id: true,
+            number: true,
+            pdfUrl: true,
+            createdAt: true,
+          },
+        },
+
+        // ✅ Documentos de respaldo (ProviderDocument + DocumentType)
+        documents: {
+          orderBy: { createdAt: 'desc' },
+          take: 5,
+          select: {
+            id: true,
+            fileUrl: true,
+            createdAt: true,
+            documentType: { select: { name: true } },
+          },
+        },
+      },
+    });
+
+    // 🔁 Mapeo EXACTO a lo que tu tabla espera (para no romper el front)
+    const rows = providers.map((p) => {
+      const estatus = !p.isActive ? 'Inactivo' : !p.isApproved ? 'En revisión' : 'Activo';
+
+      // “categoria” no existe en BD: usamos personType como etiqueta (puedes cambiarlo luego)
+      const categoria = p.personType ? (p.personType === 'MORAL' ? 'Moral' : 'Física') : 'Sin categoría';
+
+      return {
+        id: p.id,
+        proveedor: p.businessName,
+        categoria,
+        estatus,
+        comentarios: p.observaciones ? [p.observaciones] : [],
+
+        // DocumentList espera {id, nombre, tamaño}
+        // (por ahora tamaño “-”; luego lo sacas del storage si quieres)
+        facturas: p.invoices.map((i) => ({
+          id: i.id,
+          nombre: `factura_${i.number || i.id}.pdf`,
+          tamaño: "-",
+          url: i.pdfUrl || null, // ✅ extra (no rompe)
+        })),
+
+        ordenesCompra: p.purchaseOrders.map((o) => ({
+          id: o.id,
+          nombre: `oc_${o.number || o.id}.pdf`,
+          tamaño: "-",
+          url: o.pdfUrl || null,
+        })),
+
+        documentosRespaldo: p.documents.map((d) => ({
+          id: d.id,
+          nombre: `${d.documentType?.name || 'documento'}.pdf`,
+          tamaño: "-",
+          url: d.fileUrl || null,
+        })),
+      };
+    });
+
+    return res.json({ results: rows });
+  } catch (err) {
+    console.error('Error en getAdminProvidersTable:', err);
+    next(err);
+  }
+}

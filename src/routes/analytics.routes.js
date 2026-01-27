@@ -1,25 +1,17 @@
 import express from 'express';
 import { getPaymentStatusTimings, getDashboardStats, getProviderDashboardStats } from '../controllers/analytics.controller.js';
 import { requireAuth } from '../middlewares/requireAuth.js';
+import { requireRole } from '../middlewares/requireRole.js';
 
 const router = express.Router();
 
-/**
- * GET /api/analytics/dashboard
- * Obtiene estadísticas generales del dashboard
- */
-router.get('/dashboard', getDashboardStats);
+// Dashboard stats - Admin only
+router.get('/dashboard', requireAuth, requireRole('ADMIN'), getDashboardStats);
 
-/**
- * GET /api/analytics/provider-dashboard
- * Obtiene estadísticas específicas del proveedor autenticado
- */
+// Provider dashboard stats - Authenticated users
 router.get('/provider-dashboard', requireAuth, getProviderDashboardStats);
 
-/**
- * GET /api/analytics/payment-timings
- * Obtiene tiempos promedio por estado de pago
- */
-router.get('/payment-timings', getPaymentStatusTimings);
+// Payment status timings - Admin only
+router.get('/payment-timings', requireAuth, requireRole('ADMIN'), getPaymentStatusTimings);
 
 export default router;
