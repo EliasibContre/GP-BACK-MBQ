@@ -20,6 +20,13 @@ model User {
   phone                 String?
   createdAccessRequests AccessRequest[]      @relation("AccessRequestCreatedUsers")
   decidedAccessRequests AccessRequest[]      @relation("AccessRequestDecisions")
+
+  //nuevos campos
+  createdPayments       Payment[]            @relation("PaymentCreatedBy")
+  decidedPayments       Payment[]            @relation("PaymentDecidedBy") 
+
+  deletedProviders      Provider[]           @relation("DeletedProviders")
+
   auditLogs             AuditLog[]
   reviewedInvoices      Invoice[]            @relation("InvoiceReviewedBy")
   loginCodes            LoginCode[]
@@ -97,6 +104,11 @@ model Provider {
   contacts          ProviderContact[]
   documents         ProviderDocument[]
   purchaseOrders    PurchaseOrder[]
+  deletedAt         DateTime?
+  deletedBy         Int?
+  deletedByUser     User? @relation("DeletedProviders", fields: [deletedBy], references: [id])
+
+  @@index([deletedAt])
 
   @@index([businessName])
   @@index([isActive])
@@ -271,11 +283,33 @@ model Payment {
   paidAt          DateTime
   method          PaymentMethod @default(TRANSFER)
   reference       String?
+
+  status          PaymentStatus @default(PENDING)
+
+  installmentNo   Int?  //1,2,3
+  installmentOf   Int? //3
+
+  createdById     Int?
+  createdBy       User?         @relation("PaymentCreatedBy", fields: [createdById], references: [id])
+
+  decidedById     Int?
+  decidedBy       User?         @relation("PaymentDecidedBy", fields: [decidedById], references: [id])
+  decidedAt       DateTime?
+  decisionComment String?
+
   createdAt       DateTime      @default(now())
   purchaseOrderId Int
   purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
 
   @@index([purchaseOrderId])
+  @@index([status])
+  @@index([paidAt])
+}
+
+enum PaymentStatus{
+  PENDING
+  APPROVED
+  REJECTED
 }
 
 /// *
