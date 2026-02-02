@@ -109,8 +109,17 @@ export async function meCtrl(req, res) {
 }
 
 export async function logoutCtrl(req, res) {
-  res.clearCookie(process.env.COOKIE_NAME || 'gp_token');
-  return res.status(200).json({ message: 'Logout OK' });
+  res.clearCookie(COOKIE_NAME, {
+    httpOnly: true,
+    sameSite:
+      (process.env.COOKIE_SAMESITE || "lax").toLowerCase() === "none"
+        ? "none"
+        : "lax",
+    secure: (process.env.COOKIE_SECURE || "false") === "true",
+    path: "/",
+  });
+
+  return res.status(200).json({ message: "Logout OK" });
 }
 
 // ===== Cambio de contraseña (primer login) =====
