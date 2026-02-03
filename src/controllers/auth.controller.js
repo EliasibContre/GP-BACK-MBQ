@@ -1,23 +1,67 @@
+// src/controllers/auth.controller.js
 import {
   createUserWithRoles,
   startLogin,
   verifyLoginCodeAndIssueToken,
-  changePassword,
   requestPasswordReset,
   resetPassword,
-} from '../services/auth.service.js';
-import { verifyJwt, signJwt } from '../utils/jwt.js';
-import { resendLoginCode } from '../services/auth.service.js';
-import { changePassword  as changePasswordSvc} from '../services/auth.service.js';
+  resendLoginCode,
+  changePassword as changePasswordSvc,
+} from "../services/auth.service.js";
 
-const COOKIE_NAME = process.env.COOKIE_NAME || 'gp_token';
+import { verifyJwt, signJwt } from "../utils/jwt.js";
+
+const ROLE_MAP = {
+  ADMIN: "ADMIN",
+  ADMINISTRADOR: "ADMIN",
+
+  APPROVER: "APPROVER",
+  APROBADOR: "APPROVER",
+
+  PROVIDER: "PROVIDER",
+  PROVEEDOR: "PROVIDER",
+};
+
+function normalizeRole(input) {
+  const key = String(input || "").trim().toUpperCase();
+  return ROLE_MAP[key] || null;
+}
+
+// Normaliza roles del body (string o array) => array de roles canónicos
+function normalizeRoles(inputRoles) {
+  // Si no llega nada, devuelve []
+  if (!inputRoles) return [];
+
+  // Permite que llegue como string ("ADMIN") o array (["ADMIN", ...])
+  const arr = Array.isArray(inputRoles) ? inputRoles : [inputRoles];
+
+  // Normaliza y detecta inválidos
+  const normalized = [];
+  const invalid = [];
+
+  for (const r of arr) {
+    const nr = normalizeRole(r);
+    if (!nr) invalid.push(r);
+    else normalized.push(nr);
+  }
+
+  // Quita duplicados
+  const unique = [...new Set(normalized)];
+
+  return { unique, invalid };
+}
+
+const COOKIE_NAME = process.env.COOKIE_NAME || "gp_token";
 
 function cookieOptions() {
   return {
     httpOnly: true,
-    sameSite: (process.env.COOKIE_SAMESITE || 'lax').toLowerCase() === 'none' ? 'none' : 'lax',     // para localhost funciona con fetch/axios
-    secure: (process.env.COOKIE_SECURE || 'false') === 'true',       // en prod ponlo en true detrás de HTTPS
-    path: '/',
+    sameSite:
+      (process.env.COOKIE_SAMESITE || "lax").toLowerCase() === "none"
+        ? "none"
+        : "lax",
+    secure: (process.env.COOKIE_SECURE || "false") === "true",
+    path: "/",
     maxAge: 7 * 24 * 60 * 60 * 1000, // 7 días
   };
 }
@@ -32,10 +76,41 @@ function buildSessionFromClaims(claims) {
   };
 }
 
+// ✅ REGISTRO: aquí normalizamos roles antes de crear usuario
 export async function registerCtrl(req, res) {
-  const { email, fullName, password, roles } = req.body;
-  const user = await createUserWithRoles({ email, fullName, password, roles });
-  return res.status(201).json({ message: 'Usuario creado', user });
+  try {
+    const { email, fullName, password, roles } = req.body;
+
+    const { unique: normalizedRoles, invalid } = normalizeRoles(roles);
+
+    if (invalid.length) {
+      return res.status(400).json({
+        message:
+          "Rol inválido. Usa ADMIN / APPROVER / PROVIDER (o Administrador/Aprobador/Proveedor).",
+        invalid,
+      });
+    }
+
+    if (!normalizedRoles.length) {
+      return res.status(400).json({
+        message:
+          "Debes enviar al menos un rol (ADMIN, APPROVER o PROVIDER).",
+      });
+    }
+
+    // 🚀 Aquí ya van en inglés SIEMPRE
+    const user = await createUserWithRoles({
+      email,
+      fullName,
+      password,
+      roles: normalizedRoles,
+    });
+
+    return res.status(201).json({ message: "Usuario creado", user });
+  } catch (err) {
+    console.error("registerCtrl error:", err);
+    return res.status(500).json({ message: err.message || "Error del servidor" });
+  }
 }
 
 // Paso 1: credenciales
@@ -43,40 +118,38 @@ export async function loginStartCtrl(req, res) {
   const { email, password } = req.body;
 
   try {
-    const result = await startLogin({ email, password }); // servicio que crea/elimina el LoginCode y (posiblemente) envía el email
+    const result = await startLogin({ email, password });
 
     // Si estamos en modo desarrollo/disabled, devolver también el código para facilitar pruebas
-    if (String(process.env.MAILER_DISABLED || 'false') === 'true') {
-      // Si el servicio devuelve el código en el body, lo incluimos en debugCode
+    if (String(process.env.MAILER_DISABLED || "false") === "true") {
       if (result && result.code) {
         console.log(`[DEV] Login code for ${email}: ${result.code}`);
         return res.status(200).json({ ...result, debugCode: result.code });
       }
 
-      // fallback: loguear resultado y devolver éxito para permitir continuar con la verificación
-      console.log('[DEV] startLogin result (no code returned):', result);
-      return res.status(200).json({ message: result?.message || 'Código generado (dev)' });
+      console.log("[DEV] startLogin result (no code returned):", result);
+      return res
+        .status(200)
+        .json({ message: result?.message || "Código generado (dev)" });
     }
 
-    return res.status(200).json(result); // comportamiento normal
+    return res.status(200).json(result);
   } catch (err) {
-    console.error('loginStart error:', err);
+    console.error("loginStart error:", err);
 
-    // Si el fallo es por SMTP y el desarrollador pidió desactivar el mailer, devolver éxito en dev
-    if (String(process.env.MAILER_DISABLED || 'false') === 'true') {
+    if (String(process.env.MAILER_DISABLED || "false") === "true") {
       console.log(`[DEV] Ignoring error because MAILER_DISABLED=true: ${err.message}`);
-      return res.status(200).json({ message: 'Código generado (dev)' });
+      return res.status(200).json({ message: "Código generado (dev)" });
     }
 
-    // Responder error real en producción/si no está deshabilitado
-    return res.status(500).json({ message: err.message || 'Error del servidor' });
+    return res.status(500).json({ message: err.message || "Error del servidor" });
   }
 }
 
 // Paso 2: verifica código, setea cookie y responde con user + session
 export async function loginVerifyCtrl(req, res) {
   const { email, code } = req.body;
-  const { token, profile} = await verifyLoginCodeAndIssueToken({ email, code });
+  const { token, profile } = await verifyLoginCodeAndIssueToken({ email, code });
 
   // Cookie HttpOnly
   res.cookie(COOKIE_NAME, token, cookieOptions());
@@ -86,7 +159,7 @@ export async function loginVerifyCtrl(req, res) {
   const session = buildSessionFromClaims(claims);
 
   return res.status(200).json({
-    message: 'Login OK',
+    message: "Login OK",
     user: profile,
     session,
   });
@@ -95,13 +168,14 @@ export async function loginVerifyCtrl(req, res) {
 export async function resendCodeCtrl(req, res) {
   const { email } = req.body;
   await resendLoginCode(email);
-  return  res.json( { message: 'Código reenviado' } );
+  return res.json({ message: "Código reenviado" });
 }
 
 // Perfil: devuelve un JSON limpio (sin iat/exp/sub crudos)
 export async function meCtrl(req, res) {
   const { id, email, fullName, roles, mustChangePassword, iat, exp } = req.user || {};
   const session = buildSessionFromClaims({ iat, exp });
+
   return res.status(200).json({
     user: { id, email, fullName, roles, mustChangePassword },
     session,
@@ -137,7 +211,7 @@ export async function changePasswordCtrl(req, res) {
     email: profile.email,
     fullName: profile.fullName,
     roles: profile.roles,
-    mustChangePassword: profile.mustChangePassword, // ahora false
+    mustChangePassword: profile.mustChangePassword,
   });
 
   // 3) Actualizar cookie HttpOnly
@@ -148,7 +222,7 @@ export async function changePasswordCtrl(req, res) {
   const session = buildSessionFromClaims(claims);
 
   return res.status(200).json({
-    message: 'Contraseña actualizada',
+    message: "Contraseña actualizada",
     user: profile,
     session,
   });
@@ -158,11 +232,8 @@ export async function changePasswordCtrl(req, res) {
 export async function requestPasswordResetCtrl(req, res) {
   const { email } = req.body;
   const result = await requestPasswordReset(email);
-  
-  // En dev/test, si hay debugCode, devolverlo
-  if (process.env.TEST_MODE === 'true' || process.env.MAILER_DISABLED === 'true') {
-    // Nota: el service genera el token, pero no lo devuelve por seguridad
-    // En test mode, necesitarías consultarlo desde la BD o modificar el service
+
+  if (process.env.TEST_MODE === "true" || process.env.MAILER_DISABLED === "true") {
     console.log(`[DEV] Password reset requested for ${email}`);
   }
 

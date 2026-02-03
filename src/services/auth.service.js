@@ -6,17 +6,48 @@ import { sendLoginCodeEmail, sendPasswordResetEmail } from '../utils/email.js';
 import { addMinutes } from 'date-fns';
 const CODE_TTL_MIN = Number(process.env.LOGIN_CODE_TTL_MINUTES || process.env.LOGIN_CODE_TTL_MINUTES || 10);
 
-export async function createUserWithRoles({ email, fullName, password, roles = ['APPROVER'] }) {
+export async function createUserWithRoles({ email, fullName, password, roles = ["APPROVER"] }) {
   const passwordHash = await hashPassword(password);
 
-  // Verifica que existan los roles en catálogo (seed debió crearlos)
-  const roleRecords = await prisma.role.findMany({ where: { name: { in: roles } } });
-  if (roleRecords.length !== roles.length) {
-    const missing = roles.filter((r) => !roleRecords.find((rr) => rr.name === r));
-    const err = new Error(`Roles inexistentes: ${missing.join(', ')}`);
+  // ✅ Normaliza roles aquí también (blindaje)
+  const ROLE_MAP = {
+    ADMIN: "ADMIN",
+    ADMINISTRADOR: "ADMIN",
+    APPROVER: "APPROVER",
+    APROBADOR: "APPROVER",
+    PROVIDER: "PROVIDER",
+    PROVEEDOR: "PROVIDER",
+  };
+
+  const normalizeRole = (input) => {
+    const key = String(input || "").trim().toUpperCase();
+    return ROLE_MAP[key] || null;
+  };
+
+  const roleArr = Array.isArray(roles) ? roles : [roles];
+  const normalizedRoles = [...new Set(roleArr.map(normalizeRole))];
+
+  // Si algún rol vino inválido -> error 400
+  if (normalizedRoles.some((r) => !r)) {
+    const invalid = roleArr.filter((r) => !normalizeRole(r));
+    const err = new Error(
+      `Rol inválido: ${invalid.join(", ")}. Usa ADMIN/APPROVER/PROVIDER (o Administrador/Aprobador/Proveedor).`
+    );
     err.status = 400;
     throw err;
   }
+
+  // ✅ Asegurar que existan los roles canónicos en la tabla Role
+  // (Esto evita depender del seed y evita crear roles raros)
+  const roleRecords = await Promise.all(
+    normalizedRoles.map((roleName) =>
+      prisma.role.upsert({
+        where: { name: roleName },
+        update: {},
+        create: { name: roleName },
+      })
+    )
+  );
 
   try {
     const user = await prisma.user.create({
@@ -38,8 +69,8 @@ export async function createUserWithRoles({ email, fullName, password, roles = [
       roles: user.roles.map((r) => r.role.name),
     };
   } catch (e) {
-    if (e.code === 'P2002' && e.meta?.target?.includes('email')) {
-      const err = new Error('El email ya está registrado');
+    if (e.code === "P2002" && e.meta?.target?.includes("email")) {
+      const err = new Error("El email ya está registrado");
       err.status = 409;
       throw err;
     }
@@ -129,9 +160,21 @@ export async function verifyLoginCodeAndIssueToken({ email, code }) {
 
   await prisma.loginCode.update({ where: { id: record.id }, data: { usedAt: now } });
 
-  const roles = (user.roles || []).map((r) => r.role?.name).filter(Boolean);
+  const ROLE_MAP = {
+    ADMIN: "ADMIN",
+    ADMINISTRADOR: "ADMIN",
+    APPROVER: "APPROVER",
+    APROBADOR: "APPROVER",
+    PROVIDER: "PROVIDER",
+    PROVEEDOR: "PROVIDER",
+  };
 
-  
+  const roles = [...new Set(
+    (user.roles || [])
+      .map((r) => ROLE_MAP[String(r.role?.name || "").toUpperCase()] || null)
+      .filter(Boolean)
+  )];
+
   const token = signJwt({
     sub: String(user.id),
     id: user.id,
