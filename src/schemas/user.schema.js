@@ -4,7 +4,11 @@ export const createUserSchema = z.object({
   fullName: z.string().min(3, 'Nombre completo requerido').transform(s => s.trim()),
   email: z.string().email('Email inválido')
     .transform(s => s.trim().toLowerCase())
-    .refine(v => v.endsWith('@mbqinc.com') || v.endsWith('@gmail.com'), 'Solo se permiten correos @mbqinc.com o @gmail.com'),
+    // ✅ MINIMO: permitir gmail temporal
+    .refine(
+      v => v.endsWith('@mbqinc.com') || v.endsWith('@gmail.com'),
+      'Solo se permiten correos @mbqinc.com o @gmail.com'
+    ),
   // 'aprobador' -> roleId 2, 'administrador' -> roleId 3
   role: z.enum(['aprobador', 'administrador']),
   department: z.enum([
