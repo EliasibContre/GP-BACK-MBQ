@@ -1,3 +1,4 @@
+// src/routes/user.routes.js
 import { Router } from 'express';
 import validate from '../middlewares/validate.js';
 import { createUser, listUsers,updateUser, deleteUser, getMe, updateMe } from '../controllers/user.controller.js';

@@ -1,3 +1,4 @@
+// src/schemas/user.schema.js
 import { z } from 'zod';
 
 export const createUserSchema = z.object({
@@ -10,7 +11,7 @@ export const createUserSchema = z.object({
       'Solo se permiten correos @mbqinc.com o @gmail.com'
     ),
   // 'aprobador' -> roleId 2, 'administrador' -> roleId 3
-  role: z.enum(['aprobador', 'administrador']),
+  role: z.enum(["ADMIN","APPROVER","PROVIDER"]),
   department: z.enum([
     'SIN_ASIGNAR','RH','FINANZAS','COMPRAS','TI','VENTAS','MARKETING','OPERACIONES','LOGISTICA','CALIDAD','DIRECCION_GENERAL'
   ])
@@ -21,7 +22,7 @@ export const updateUserSchema = z.object({
   department: z.enum([
     'SIN_ASIGNAR','RH','FINANZAS','COMPRAS','TI','VENTAS','MARKETING','OPERACIONES','LOGISTICA','CALIDAD','DIRECCION_GENERAL'
   ]).optional(),
-  role: z.enum(['aprobador', 'administrador']).optional(),
+  role: z.enum(["ADMIN","APPROVER","PROVIDER"]).optional(),
   isActive: z.boolean().optional(),
 });
 
