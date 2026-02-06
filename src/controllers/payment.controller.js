@@ -386,3 +386,161 @@ export async function getPayment(req, res) {
     res.status(500).json({ error: 'Error al obtener pago', detail: error.message });
   }
 }
+
+/**
+ * Listar pagos para aprobación (pendientes / aprobados / rechazados)
+ * GET /api/payments/approval?status=PENDING&search=...&method=TRANSFER
+ * Acceso: ADMIN, APPROVER
+ */
+export async function listPaymentsForApproval(req, res) {
+  try {
+    const {
+      status = 'PENDING', // PENDING | APPROVED | REJECTED
+      search = '',
+      method,            // TRANSFER | CASH | CARD | OTHER
+      limit = 100,
+      offset = 0
+    } = req.query;
+
+    const where = {};
+
+    // status
+    if (status) where.status = status;
+
+    // method (si viene)
+    if (method) where.method = method;
+
+    // search (OC number, proveedor, referencia, aprobador)
+    if (search && String(search).trim()) {
+      const q = String(search).trim();
+      where.OR = [
+        { reference: { contains: q, mode: 'insensitive' } },
+        { purchaseOrder: { number: { contains: q, mode: 'insensitive' } } },
+        { purchaseOrder: { provider: { businessName: { contains: q, mode: 'insensitive' } } } },
+        { decidedBy: { fullName: { contains: q, mode: 'insensitive' } } },
+      ];
+    }
+
+    const [payments, total] = await Promise.all([
+      prisma.payment.findMany({
+        where,
+        include: {
+          decidedBy: { select: { id: true, fullName: true, email: true } },
+          createdBy: { select: { id: true, fullName: true, email: true } },
+          purchaseOrder: {
+            select: {
+              id: true,
+              number: true,
+              total: true,
+              status: true,
+              provider: { select: { id: true, businessName: true, rfc: true } }
+            }
+          }
+        },
+        orderBy: [{ createdAt: 'desc' }],
+        take: parseInt(limit),
+        skip: parseInt(offset)
+      }),
+      prisma.payment.count({ where })
+    ]);
+
+    res.json({
+      payments,
+      pagination: {
+        total,
+        limit: parseInt(limit),
+        offset: parseInt(offset),
+        hasMore: parseInt(offset) + parseInt(limit) < total
+      }
+    });
+  } catch (error) {
+    console.error('Error listPaymentsForApproval:', error);
+    res.status(500).json({ error: 'Error al listar pagos para aprobación', detail: error.message });
+  }
+}
+
+
+/**
+ * Decidir un pago (aprobar/rechazar)
+ * PATCH /api/payments/:id/decision
+ * body: { decision: "APPROVE" | "REJECT", comment?: string }
+ * Acceso: ADMIN, APPROVER
+ */
+export async function decidePayment(req, res) {
+  try {
+    const { id } = req.params;
+    const { decision, comment } = req.body;
+    const userId = req.user?.id;
+
+    if (!decision || !['APPROVE', 'REJECT'].includes(decision)) {
+      return res.status(400).json({ error: 'decision debe ser APPROVE o REJECT' });
+    }
+
+    if (decision === 'REJECT') {
+      const c = String(comment || '').trim();
+      if (!c || c.length < 10) {
+        return res.status(400).json({ error: 'El comentario es obligatorio (mín. 10 caracteres) para rechazar.' });
+      }
+    }
+
+    const payment = await prisma.payment.findUnique({
+      where: { id: parseInt(id) },
+      include: {
+        purchaseOrder: { select: { id: true, number: true, provider: { select: { businessName: true } } } }
+      }
+    });
+
+    if (!payment) return res.status(404).json({ error: 'Pago no encontrado' });
+
+    if (payment.status !== 'PENDING') {
+      return res.status(409).json({ error: 'Este pago ya fue decidido', currentStatus: payment.status });
+    }
+
+    const nextStatus = decision === 'APPROVE' ? 'APPROVED' : 'REJECTED';
+
+    const updated = await prisma.payment.update({
+      where: { id: parseInt(id) },
+      data: {
+        status: nextStatus,
+        decidedById: userId,
+        decidedAt: new Date(),
+        decisionComment: decision === 'REJECT' ? String(comment).trim() : null
+      },
+      include: {
+        decidedBy: { select: { id: true, fullName: true, email: true } },
+        purchaseOrder: {
+          select: {
+            id: true,
+            number: true,
+            total: true,
+            provider: { select: { id: true, businessName: true } }
+          }
+        }
+      }
+    });
+
+    // Auditoría
+    await prisma.auditLog.create({
+      data: {
+        actorId: userId,
+        action: decision === 'APPROVE' ? 'APPROVE_PAYMENT' : 'REJECT_PAYMENT',
+        entity: 'Payment',
+        entityId: updated.id,
+        meta: {
+          purchaseOrderNumber: payment.purchaseOrder.number,
+          providerName: payment.purchaseOrder.provider.businessName,
+          decision,
+          comment: decision === 'REJECT' ? String(comment).trim() : null
+        }
+      }
+    });
+
+    res.json({
+      message: decision === 'APPROVE' ? 'Pago aprobado' : 'Pago rechazado',
+      payment: updated
+    });
+  } catch (error) {
+    console.error('Error decidePayment:', error);
+    res.status(500).json({ error: 'Error al decidir pago', detail: error.message });
+  }
+}

@@ -1,12 +1,11 @@
-import express from 'express';
-import { requireAuth } from '../middlewares/requireAuth.js';
-import { requireRole } from '../middlewares/requireRole.js';
 import {
   createPayment,
   updatePayment,
   deletePayment,
   listPayments,
-  getPayment
+  getPayment,
+  listPaymentsForApproval,
+  decidePayment
 } from '../controllers/payment.controller.js';
 
 const router = express.Router();
@@ -40,5 +39,18 @@ router.put('/:id', requireAuth, requireRole(['ADMIN', 'APPROVER']), updatePaymen
  * Acceso: ADMIN
  */
 router.delete('/:id', requireAuth, requireRole(['ADMIN']), deletePayment);
+
+/**
+ * GET /api/payments/approval - Listar pagos para aprobación
+ * Acceso: ADMIN, APPROVER
+ */
+router.get('/approval', requireAuth, requireRole(['ADMIN', 'APPROVER']), listPaymentsForApproval);
+
+/**
+ * PATCH /api/payments/:id/decision - Aprobar/Rechazar pago
+ * Acceso: ADMIN, APPROVER
+ */
+router.patch('/:id/decision', requireAuth, requireRole(['ADMIN', 'APPROVER']), decidePayment);
+
 
 export default router;
