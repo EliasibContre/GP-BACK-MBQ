@@ -16,6 +16,7 @@ import calendarRoutes from './routes/calendar.routes.js';
 import notificationRoutes from './routes/notification.routes.js';
 import analyticsRoutes from './routes/analytics.routes.js';
 import paymentRoutes from './routes/payment.routes.js';
+import satRoutes from "./routes/sat.routes.js";
 
 // Carga variables de entorno
 import './config/env.js';
@@ -55,6 +56,8 @@ app.use('/api/calendar', calendarRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/analytics', analyticsRoutes);
 app.use('/api/payments', paymentRoutes);
+app.use("/api/sat", satRoutes);
+
 
 // Servir archivos estáticos de uploads
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));

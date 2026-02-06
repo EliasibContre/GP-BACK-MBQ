@@ -5,6 +5,7 @@ const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_KEY; // Service role key (server-side only)
 
 if (!supabaseUrl || !supabaseServiceKey) {
+  throw new Error("Faltan SUPABASE_URL o SUPABASE_SERVICE_KEY en .env");
 }
 
 // Cliente de Supabase con service role (bypass RLS)
