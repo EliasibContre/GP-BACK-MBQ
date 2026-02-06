@@ -27,11 +27,17 @@ export async function getProviders(req, res) {
         id: true,
         businessName: true,
         emailContacto: true,
+        telefono: true,
         rfc: true,
         personType: true,
         isActive: true,
         isApproved: true,
         createdAt: true,
+        bankAccounts: {
+          select: { bankName: true, clabe: true },
+          orderBy: { createdAt: "desc" },
+          take: 1,
+        },
         documents: {
           select: {
             id: true,
@@ -142,12 +148,12 @@ export async function downloadPurchaseOrder(req, res) {
     });
 
     if (!order) return res.status(404).json({ error: 'Orden no encontrada' });
-    
+
     // Si el archivo está en Supabase, redirigir directamente
     if (order.pdfUrl && order.pdfUrl.includes('supabase')) {
       return res.redirect(order.pdfUrl);
     }
-    
+
     if (!order.storageKey) return res.status(404).json({ error: 'Archivo no encontrado' });
 
     // Fallback: archivo local
@@ -180,12 +186,12 @@ export async function downloadInvoice(req, res) {
     });
 
     if (!order) return res.status(404).json({ error: 'Orden no encontrada' });
-    
+
     // Si el archivo está en Supabase, redirigir directamente
     if (order.invoicePdfUrl && order.invoicePdfUrl.includes('supabase')) {
       return res.redirect(order.invoicePdfUrl);
     }
-    
+
     if (!order.invoiceStorageKey) return res.status(404).json({ error: 'Factura no encontrada' });
 
     // Fallback: archivo local
@@ -225,12 +231,12 @@ export async function downloadInvoiceXml(req, res) {
     });
 
     if (!order) return res.status(404).json({ error: 'Orden no encontrada' });
-    
+
     // Si el archivo está en Supabase, redirigir directamente
     if (order.invoiceXmlUrl && order.invoiceXmlUrl.includes('supabase')) {
       return res.redirect(order.invoiceXmlUrl);
     }
-    
+
     if (!order.invoiceXmlStorageKey) return res.status(404).json({ error: 'XML de factura no encontrado' });
 
     // Fallback: archivo local
