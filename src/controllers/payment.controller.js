@@ -1,6 +1,7 @@
 import { prisma } from '../config/prisma.js';
 import { createNotification } from '../services/notification.service.js';
 import { sendPaymentRegisteredEmail } from '../utils/email.js';
+import { logAudit } from "../utils/audit.js";
 
 /**
  * Crear un nuevo pago
@@ -15,8 +16,8 @@ export async function createPayment(req, res) {
 
     // Validar campos requeridos
     if (!purchaseOrderId || !amount || !paidAt) {
-      return res.status(400).json({ 
-        error: 'purchaseOrderId, amount y paidAt son requeridos' 
+      return res.status(400).json({
+        error: 'purchaseOrderId, amount y paidAt son requeridos'
       });
     }
 
@@ -102,13 +103,26 @@ export async function createPayment(req, res) {
       }
     });
 
+    await logAudit(req, {
+      actorId: userId ?? null,
+      action: "PAYMENT_CREATE",
+      entity: "Payment",
+      entityId: payment.id,
+      meta: {
+        purchaseOrderId: parseInt(purchaseOrderId),
+        amount: parseFloat(amount),
+        method: method || 'TRANSFER',
+        providerName: po.provider.businessName
+      }
+    });
+
     console.log(`✅ Pago creado: OC ${po.number}, Monto $${amount}`);
 
     res.status(201).json({
       message: 'Pago registrado correctamente',
       payment
     });
-    
+
     // Crear notificaciones internas (usuarios de finanzas / administradores)
     try {
       // Buscar usuarios con rol FINANZAS; si no hay, fallback a ADMIN/APPROVER
@@ -227,6 +241,15 @@ export async function updatePayment(req, res) {
       }
     });
 
+    await logAudit(req, {
+  actorId: userId ?? null,
+  action: "PAYMENT_UPDATE",
+  entity: "Payment",
+  entityId: parseInt(id),
+  meta: { updatedFields: Object.keys(updateData) }
+});
+
+
     res.json({
       message: 'Pago actualizado correctamente',
       payment: updatedPayment
@@ -272,6 +295,18 @@ export async function deletePayment(req, res) {
         }
       }
     });
+
+    await logAudit(req, {
+  actorId: userId ?? null,
+  action: "PAYMENT_DELETE",
+  entity: "Payment",
+  entityId: parseInt(id),
+  meta: {
+    purchaseOrderNumber: payment.purchaseOrder.number,
+    providerName: payment.purchaseOrder.provider.businessName
+  }
+});
+
 
     console.log(`🗑️ Pago eliminado: OC ${payment.purchaseOrder.number}`);
 
@@ -534,6 +569,20 @@ export async function decidePayment(req, res) {
         }
       }
     });
+
+    await logAudit(req, {
+  actorId: userId ?? null,
+  action: decision === 'APPROVE' ? "PAYMENT_APPROVE" : "PAYMENT_REJECT",
+  entity: "Payment",
+  entityId: updated.id,
+  meta: {
+    purchaseOrderNumber: payment.purchaseOrder.number,
+    providerName: payment.purchaseOrder.provider.businessName,
+    decision,
+    comment: decision === 'REJECT' ? String(comment).trim() : null
+  }
+});
+
 
     res.json({
       message: decision === 'APPROVE' ? 'Pago aprobado' : 'Pago rechazado',

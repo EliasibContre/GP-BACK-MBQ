@@ -9,6 +9,7 @@ import {
   changePassword as changePasswordSvc,
 } from "../services/auth.service.js";
 
+import { logAudit } from "../utils/audit.js";
 import { verifyJwt, signJwt } from "../utils/jwt.js";
 
 const ROLE_MAP = {
@@ -106,6 +107,14 @@ export async function registerCtrl(req, res) {
       roles: normalizedRoles,
     });
 
+    await logAudit(req, {
+      actorId: req.user?.id ?? null, // si quien crea es admin logueado (si no, null)
+      action: "AUTH_REGISTER_USER",
+      entity: "User",
+      entityId: user?.id ?? null,
+      meta: { email, fullName, roles: normalizedRoles },
+    });
+
     return res.status(201).json({ message: "Usuario creado", user });
   } catch (err) {
     console.error("registerCtrl error:", err);
@@ -117,8 +126,17 @@ export async function registerCtrl(req, res) {
 export async function loginStartCtrl(req, res) {
   const { email, password } = req.body;
 
+
   try {
     const result = await startLogin({ email, password });
+    // ✅ AUDIT: intento
+    await logAudit({
+      actorId: result?.user?.id ?? null, // si tu startLogin devuelve user
+      action: "AUTH_LOGIN_START",
+      entity: "Auth",
+      entityId: null,
+      meta: { email },
+    });
 
     // Si estamos en modo desarrollo/disabled, devolver también el código para facilitar pruebas
     if (String(process.env.MAILER_DISABLED || "false") === "true") {
@@ -135,7 +153,25 @@ export async function loginStartCtrl(req, res) {
 
     return res.status(200).json(result);
   } catch (err) {
+    // ✅ AUDIT: resultado (éxito o fallo)
+    // ✅ AUDIT: ok start
+    await logAudit(req, {
+      actorId: null,
+      action: "AUTH_LOGIN_START_OK",
+      entity: "AUTH",
+      entityId: null,
+      meta: { email },
+    });
     console.error("loginStart error:", err);
+
+    // ✅ AUDIT: fail start
+    await logAudit(req, {
+      actorId: null,
+      action: "AUTH_LOGIN_START_FAIL",
+      entity: "AUTH",
+      entityId: null,
+      meta: { email, reason: err?.message || "UNKNOWN" },
+    });
 
     if (String(process.env.MAILER_DISABLED || "false") === "true") {
       console.log(`[DEV] Ignoring error because MAILER_DISABLED=true: ${err.message}`);
@@ -149,25 +185,57 @@ export async function loginStartCtrl(req, res) {
 // Paso 2: verifica código, setea cookie y responde con user + session
 export async function loginVerifyCtrl(req, res) {
   const { email, code } = req.body;
-  const { token, profile } = await verifyLoginCodeAndIssueToken({ email, code });
 
-  // Cookie HttpOnly
-  res.cookie(COOKIE_NAME, token, cookieOptions());
+  try {
+    const { token, profile } = await verifyLoginCodeAndIssueToken({ email, code });
+    // ✅ AUDIT: login success
+    await logAudit({
+      actorId: profile?.id ?? null,
+      action: "AUTH_LOGIN_SUCCESS",
+      entity: "User",
+      entityId: profile?.id ?? null,
+      meta: { email },
+    });
 
-  // Construir bloque de sesión a partir de los claims del token
-  const claims = verifyJwt(token);
-  const session = buildSessionFromClaims(claims);
 
-  return res.status(200).json({
-    message: "Login OK",
-    user: profile,
-    session,
-  });
+
+    res.cookie(COOKIE_NAME, token, cookieOptions());
+
+    const claims = verifyJwt(token);
+    const session = buildSessionFromClaims(claims);
+
+    return res.status(200).json({
+      message: "Login OK",
+      user: profile,
+      session,
+    });
+  } catch (err) {
+    // ✅ AUDIT: login fail (código inválido/expirado)
+    await logAudit(req, {
+      actorId: null,
+      action: "AUTH_LOGIN_FAIL",
+      entity: "AUTH",
+      entityId: null,
+      meta: { email, reason: err?.message || "INVALID_OR_EXPIRED_CODE" },
+    });
+
+    return res.status(401).json({ message: err.message || "Código inválido" });
+  }
 }
 
 export async function resendCodeCtrl(req, res) {
   const { email } = req.body;
   await resendLoginCode(email);
+
+  // ✅ AUDIT
+  await logAudit(req, {
+    actorId: null,
+    action: "AUTH_RESEND_CODE",
+    entity: "AUTH",
+    entityId: null,
+    meta: { email },
+  });
+
   return res.json({ message: "Código reenviado" });
 }
 
@@ -183,6 +251,7 @@ export async function meCtrl(req, res) {
 }
 
 export async function logoutCtrl(req, res) {
+
   res.clearCookie(COOKIE_NAME, {
     httpOnly: true,
     sameSite:
@@ -192,6 +261,16 @@ export async function logoutCtrl(req, res) {
     secure: (process.env.COOKIE_SECURE || "false") === "true",
     path: "/",
   });
+
+  // ✅ AUDIT LOGOUT
+  await logAudit({
+    actorId: req.user?.id ?? null,
+    action: "AUTH_LOGOUT",
+    entity: "User",
+    entityId: req.user?.id ?? null,
+    meta: { email: req.user?.email },
+  });
+
 
   return res.status(200).json({ message: "Logout OK" });
 }
@@ -221,6 +300,15 @@ export async function changePasswordCtrl(req, res) {
   const claims = verifyJwt(token);
   const session = buildSessionFromClaims(claims);
 
+  // ✅ AUDIT
+  await logAudit(req, {
+    actorId: profile?.id ?? userId ?? null,
+    action: "AUTH_PASSWORD_CHANGE",
+    entity: "User",
+    entityId: profile?.id ?? userId ?? null,
+    meta: { email: profile?.email },
+  });
+
   return res.status(200).json({
     message: "Contraseña actualizada",
     user: profile,
@@ -231,6 +319,16 @@ export async function changePasswordCtrl(req, res) {
 // ===== Recuperación de contraseña =====
 export async function requestPasswordResetCtrl(req, res) {
   const { email } = req.body;
+
+  // ✅ AUDIT: request
+  await logAudit(req, {
+    actorId: null,
+    action: "AUTH_PASSWORD_RESET_REQUEST",
+    entity: "AUTH",
+    entityId: null,
+    meta: { email },
+  });
+
   const result = await requestPasswordReset(email);
 
   if (process.env.TEST_MODE === "true" || process.env.MAILER_DISABLED === "true") {
@@ -243,5 +341,13 @@ export async function requestPasswordResetCtrl(req, res) {
 export async function resetPasswordCtrl(req, res) {
   const { email, token, newPassword } = req.body;
   const result = await resetPassword({ email, token, newPassword });
+  // ✅ AUDIT: reset success (best-effort)
+  await logAudit(req, {
+    actorId: null,
+    action: "AUTH_PASSWORD_RESET_SUCCESS",
+    entity: "AUTH",
+    entityId: null,
+    meta: { email },
+  });
   return res.status(200).json(result);
 }

@@ -1,7 +1,8 @@
+// src/controllers/document.controller.js
 import { prisma } from '../config/prisma.js';
-import { uploadToSupabase, deleteFromSupabase, getPublicUrl } from '../config/supabase.js';
-import fs from 'fs/promises';
+import { uploadToSupabase, deleteFromSupabase } from '../config/supabase.js';
 import path from 'path';
+import { logAudit } from "../utils/audit.js";
 
 // Obtener tipos de documento según tipo de persona
 export async function getDocumentTypes(req, res) {
@@ -9,11 +10,10 @@ export async function getDocumentTypes(req, res) {
     const { personType } = req.query;
     console.log('GET /api/documents/types personType:', personType);
 
-
     if (!personType || !['FISICA', 'MORAL'].includes(personType)) {
-    console.error(' Tipo de persona inválido:', personType);
-      return res.status(400).json({ 
-        error: 'Tipo de persona inválido. Debe ser FISICA o MORAL' 
+      console.error(' Tipo de persona inválido:', personType);
+      return res.status(400).json({
+        error: 'Tipo de persona inválido. Debe ser FISICA o MORAL'
       });
     }
 
@@ -39,27 +39,20 @@ export async function getMyDocuments(req, res) {
   try {
     const userEmail = req.user.email;
 
-    // Buscar proveedor por email
     const provider = await prisma.provider.findFirst({
-      where: { 
+      where: {
         emailContacto: userEmail,
-        isActive: true 
+        isActive: true
       },
       include: {
         documents: {
           include: {
             documentType: true,
             uploadedBy: {
-              select: {
-                fullName: true,
-                email: true
-              }
+              select: { fullName: true, email: true }
             },
             reviewedBy: {
-              select: {
-                fullName: true,
-                email: true
-              }
+              select: { fullName: true, email: true }
             }
           },
           orderBy: { createdAt: 'desc' }
@@ -90,16 +83,15 @@ export async function uploadDocuments(req, res) {
     const { personType } = req.body;
 
     if (!personType || !['FISICA', 'MORAL'].includes(personType)) {
-      return res.status(400).json({ 
-        error: 'Tipo de persona inválido. Debe ser FISICA o MORAL' 
+      return res.status(400).json({
+        error: 'Tipo de persona inválido. Debe ser FISICA o MORAL'
       });
     }
 
-    // Buscar proveedor por email
     const provider = await prisma.provider.findFirst({
-      where: { 
+      where: {
         emailContacto: userEmail,
-        isActive: true 
+        isActive: true
       }
     });
 
@@ -107,12 +99,10 @@ export async function uploadDocuments(req, res) {
       return res.status(404).json({ error: 'Proveedor no encontrado' });
     }
 
-    // Verificar que se subieron archivos
     if (!req.files || req.files.length === 0) {
       return res.status(400).json({ error: 'No se subieron archivos' });
     }
 
-    // Obtener tipos de documento requeridos
     const requiredDocTypes = await prisma.documentType.findMany({
       where: {
         requiredFor: { has: personType },
@@ -120,20 +110,32 @@ export async function uploadDocuments(req, res) {
       }
     });
 
-    // Validar que se subieron todos los documentos requeridos
     const uploadedDocTypeCodes = req.files.map(f => f.fieldname);
-    const missingDocs = requiredDocTypes.filter(dt => 
+    const missingDocs = requiredDocTypes.filter(dt =>
       !uploadedDocTypeCodes.includes(dt.code)
     );
 
     if (missingDocs.length > 0) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: 'Faltan documentos requeridos',
         missing: missingDocs.map(d => d.name)
       });
     }
 
-    // Primero: subir todos los archivos a Supabase fuera de la transacción
+    // ✅ AUDIT: intento subida
+    await logAudit(req, {
+      actorId: userId,
+      action: "DOC_UPLOAD_START",
+      entity: "ProviderDocument",
+      entityId: provider.id,
+      meta: {
+        providerId: provider.id,
+        personType,
+        files: req.files.map(f => ({ code: f.fieldname, name: f.originalname, size: f.size }))
+      }
+    });
+
+    // Subir a Supabase fuera de transacción
     const uploads = [];
     for (const file of req.files) {
       const docTypeCode = file.fieldname;
@@ -149,17 +151,27 @@ export async function uploadDocuments(req, res) {
         console.log('Uploaded to Supabase:', { bucket: 'provider-documents', path: filePath, storageKey: upload.path });
       } catch (e) {
         console.error('Error subiendo documento a Supabase (fuera tx) tipo:', docTypeCode, e);
-        // Si falla una subida, intentar limpiar las previas
+
         for (const u of uploads) {
-          try { await deleteFromSupabase('provider-documents', u.storageKey); } catch (er) { console.warn('No se pudo eliminar archivo tras fallo:', u.storageKey, er.message || er); }
+          try { await deleteFromSupabase('provider-documents', u.storageKey); }
+          catch (er) { console.warn('No se pudo eliminar archivo tras fallo:', u.storageKey, er.message || er); }
         }
+
+        // ✅ AUDIT: fallo subida storage
+        await logAudit(req, {
+          actorId: userId,
+          action: "DOC_UPLOAD_STORAGE_FAIL",
+          entity: "ProviderDocument",
+          entityId: provider.id,
+          meta: { providerId: provider.id, personType, reason: e.message || String(e) }
+        });
+
         return res.status(502).json({ error: 'Error subiendo documento a storage', detail: e.message || String(e) });
       }
     }
 
     console.log('All uploads completed, proceeding to DB transaction. uploads count:', uploads.length);
 
-    // Ahora ejecutar la transacción para actualizar BD usando los resultados de las subidas
     const savedDocuments = [];
     try {
       await prisma.$transaction(async (tx) => {
@@ -177,7 +189,8 @@ export async function uploadDocuments(req, res) {
           let document;
           if (existing) {
             if (existing.storageKey) {
-              try { await deleteFromSupabase('provider-documents', existing.storageKey); } catch (e) { console.warn('No se pudo eliminar archivo antiguo de Supabase:', e.message || e); }
+              try { await deleteFromSupabase('provider-documents', existing.storageKey); }
+              catch (e) { console.warn('No se pudo eliminar archivo antiguo de Supabase:', e.message || e); }
             }
 
             document = await tx.providerDocument.update({
@@ -211,30 +224,69 @@ export async function uploadDocuments(req, res) {
           savedDocuments.push(document);
         }
 
+        // ✅ Auditoría en DB (opcional) — puedes dejarla o quitarla
         await tx.auditLog.create({
           data: {
             actorId: userId,
             action: 'UPLOAD_PROVIDER_DOCUMENTS',
             entity: 'ProviderDocument',
             entityId: provider.id,
-            meta: { personType, documentsCount: savedDocuments.length, documentTypes: savedDocuments.map(d => d.documentType.name) }
+            meta: {
+              personType,
+              documentsCount: savedDocuments.length,
+              documentTypes: savedDocuments.map(d => d.documentType.name)
+            }
           }
         });
       });
     } catch (e) {
       console.error('Error en transacción al guardar documentos en BD:', e);
-      // Si la transacción falla, eliminar los archivos ya subidos para evitar orfanatos
+
       for (const u of uploads) {
-        try { await deleteFromSupabase('provider-documents', u.storageKey); } catch (er) { console.warn('No se pudo eliminar archivo tras fallo transacción:', u.storageKey, er.message || er); }
+        try { await deleteFromSupabase('provider-documents', u.storageKey); }
+        catch (er) { console.warn('No se pudo eliminar archivo tras fallo transacción:', u.storageKey, er.message || er); }
       }
+
+      // ✅ AUDIT: fallo transacción DB
+      await logAudit(req, {
+        actorId: userId,
+        action: "DOC_UPLOAD_DB_FAIL",
+        entity: "ProviderDocument",
+        entityId: provider.id,
+        meta: { providerId: provider.id, personType, reason: e.message || String(e) }
+      });
+
       return res.status(500).json({ error: 'Error al guardar documentos en base de datos', detail: e.message || String(e) });
     }
+
+    // ✅ AUDIT: ok subida
+    await logAudit(req, {
+      actorId: userId,
+      action: "DOC_UPLOAD_SUCCESS",
+      entity: "ProviderDocument",
+      entityId: provider.id,
+      meta: {
+        providerId: provider.id,
+        personType,
+        documentsCount: savedDocuments.length,
+        documentIds: savedDocuments.map(d => d.id),
+      }
+    });
 
     res.status(201).json({ message: 'Documentos subidos correctamente', documents: savedDocuments });
   } catch (error) {
     console.error('Error al subir documentos:', error);
-    res.status(500).json({ 
-      error: error.message || 'Error al subir documentos' 
+
+    await logAudit(req, {
+      actorId: req.user?.id ?? null,
+      action: "DOC_UPLOAD_FAIL",
+      entity: "ProviderDocument",
+      entityId: null,
+      meta: { reason: error.message || String(error) }
+    });
+
+    res.status(500).json({
+      error: error.message || 'Error al subir documentos'
     });
   }
 }
@@ -246,11 +298,10 @@ export async function deleteDocument(req, res) {
     const userId = req.user.id;
     const { documentId } = req.params;
 
-    // Buscar proveedor
     const provider = await prisma.provider.findFirst({
-      where: { 
+      where: {
         emailContacto: userEmail,
-        isActive: true 
+        isActive: true
       }
     });
 
@@ -258,7 +309,6 @@ export async function deleteDocument(req, res) {
       return res.status(404).json({ error: 'Proveedor no encontrado' });
     }
 
-    // Buscar documento
     const document = await prisma.providerDocument.findFirst({
       where: {
         id: parseInt(documentId),
@@ -270,7 +320,6 @@ export async function deleteDocument(req, res) {
       return res.status(404).json({ error: 'Documento no encontrado' });
     }
 
-    // Eliminar archivo de Supabase Storage
     if (document.storageKey) {
       try {
         await deleteFromSupabase('provider-documents', document.storageKey);
@@ -279,11 +328,8 @@ export async function deleteDocument(req, res) {
       }
     }
 
-    // Eliminar registro de BD
     await prisma.$transaction(async (tx) => {
-      await tx.providerDocument.delete({
-        where: { id: document.id }
-      });
+      await tx.providerDocument.delete({ where: { id: document.id } });
 
       await tx.auditLog.create({
         data: {
@@ -291,17 +337,32 @@ export async function deleteDocument(req, res) {
           action: 'DELETE_PROVIDER_DOCUMENT',
           entity: 'ProviderDocument',
           entityId: document.id,
-          meta: {
-            providerId: provider.id,
-            documentTypeId: document.documentTypeId
-          }
+          meta: { providerId: provider.id, documentTypeId: document.documentTypeId }
         }
       });
+    });
+
+    // ✅ AUDIT extra (con ip/ua)
+    await logAudit(req, {
+      actorId: userId,
+      action: "DOC_DELETE",
+      entity: "ProviderDocument",
+      entityId: document.id,
+      meta: { providerId: provider.id, documentTypeId: document.documentTypeId }
     });
 
     res.json({ message: 'Documento eliminado correctamente' });
   } catch (error) {
     console.error('Error al eliminar documento:', error);
+
+    await logAudit(req, {
+      actorId: req.user?.id ?? null,
+      action: "DOC_DELETE_FAIL",
+      entity: "ProviderDocument",
+      entityId: parseInt(req.params.documentId) || null,
+      meta: { reason: error.message || String(error) }
+    });
+
     res.status(500).json({ error: 'Error al eliminar documento' });
   }
 }

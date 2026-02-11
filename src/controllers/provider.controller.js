@@ -1,6 +1,8 @@
 import { prisma } from '../config/prisma.js';
 import { generateTempPassword, hashPassword } from '../utils/password.js';
 import { sendProviderWelcomeEmail } from '../utils/email.js';
+import { logAudit } from "../utils/audit.js";
+
 
 const RFC_REGEX = /^[A-ZÑ&]{3,4}\d{6}[A-Z0-9]{3}$/i;
 
@@ -11,12 +13,12 @@ export async function searchProviders(req, res, next) {
     // Si no hay query, devolver todos los proveedores activos
     if (!q) {
       const providers = await prisma.provider.findMany({
-        where: { 
+        where: {
           isActive: true
         },
-        select: { 
-          id: true, 
-          rfc: true, 
+        select: {
+          id: true,
+          rfc: true,
           businessName: true,
           emailContacto: true,
           telefono: true,
@@ -45,9 +47,9 @@ export async function searchProviders(req, res, next) {
             }
           ]
         },
-        select: { 
-          id: true, 
-          rfc: true, 
+        select: {
+          id: true,
+          rfc: true,
           businessName: true,
           emailContacto: true,
           telefono: true,
@@ -59,7 +61,7 @@ export async function searchProviders(req, res, next) {
         take: 25
       }),
       prisma.satBlacklist.findMany({
-        where: { 
+        where: {
           OR: [
             { rfc: { contains: q, mode: 'insensitive' } },
             { name: { contains: q, mode: 'insensitive' } },
@@ -85,7 +87,7 @@ export async function searchProviders(req, res, next) {
 
 export async function getProviderByRfc(req, res, next) {
   try {
-    
+
     const rfc = String(req.params.rfc || '').trim().toUpperCase();
     if (!RFC_REGEX.test(rfc)) return res.status(400).json({ message: 'RFC inválido' });
 
@@ -141,7 +143,7 @@ export async function createProvider(req, res, next) {
     let personTypeEnum = null;
     if (personType) {
       const upper = String(personType).toUpperCase();
-      if (['FISICA','MORAL'].includes(upper)) personTypeEnum = upper;
+      if (['FISICA', 'MORAL'].includes(upper)) personTypeEnum = upper;
     } else if (tipoProveedor) {
       const lower = String(tipoProveedor).toLowerCase();
       if (lower === 'fisica') personTypeEnum = 'FISICA';
@@ -159,8 +161,9 @@ export async function createProvider(req, res, next) {
           data: { email, passwordHash, fullName: 'Proveedor', isActive: true, mustChangePassword: true }
         });
       }
-      // Asegurar rol PROVIDER dinámicamente (no asumir id=1)
-      let providerRole = await tx.role.findFirst({ where: { name: { in: ['PROVIDER','provider','Provider'] } } });
+
+      // Asegurar rol PROVIDER
+      let providerRole = await tx.role.findFirst({ where: { name: { in: ['PROVIDER', 'provider', 'Provider'] } } });
       if (!providerRole) {
         providerRole = await tx.role.create({ data: { name: 'PROVIDER' } });
         console.log('[createProvider] Rol PROVIDER creado con id:', providerRole.id);
@@ -199,9 +202,49 @@ export async function createProvider(req, res, next) {
         });
       }
 
-      return { userId: user.id, providerId: provider.id, providerBusinessName: provider.businessName, providerRfc: provider.rfc, personType: provider.personType };
+      // ✅ Auditoría (tx)
+      await tx.auditLog.create({
+        data: {
+          actorId: req.user?.id ?? null,
+          action: "PROVIDER_CREATE",
+          entity: "Provider",
+          entityId: provider.id,
+          meta: {
+            providerId: provider.id,
+            businessName: provider.businessName,
+            rfc: provider.rfc,
+            emailContacto: provider.emailContacto,
+            personType: provider.personType,
+            isNewUser
+          }
+        }
+      });
+
+      return {
+        userId: user.id,
+        providerId: provider.id,
+        providerBusinessName: provider.businessName,
+        providerRfc: provider.rfc,
+        personType: provider.personType
+      };
     });
-    // Enviar correo si se creó usuario nuevo y mailer activo
+
+    // ✅ Audit extra con ip/ua
+    await logAudit(req, {
+      actorId: req.user?.id ?? null,
+      action: "PROVIDER_CREATE",
+      entity: "Provider",
+      entityId: result.providerId,
+      meta: {
+        providerId: result.providerId,
+        businessName: result.providerBusinessName,
+        rfc: result.providerRfc,
+        personType: result.personType,
+        emailContacto: email,
+        isNewUser
+      }
+    });
+
     if (isNewUser && provisionalPassword && email && String(process.env.MAILER_DISABLED || 'false') !== 'true') {
       try {
         await sendProviderWelcomeEmail(email, { businessName: result.providerBusinessName, rfc: result.providerRfc }, provisionalPassword, result.personType);
@@ -210,7 +253,12 @@ export async function createProvider(req, res, next) {
       }
     }
 
-    res.status(201).json({ userId: result.userId, providerId: result.providerId, personType: result.personType, passwordSent: !!(isNewUser && provisionalPassword) });
+    res.status(201).json({
+      userId: result.userId,
+      providerId: result.providerId,
+      personType: result.personType,
+      passwordSent: !!(isNewUser && provisionalPassword)
+    });
   } catch (err) {
     if (err.status) return res.status(err.status).json({ message: err.message });
     if (err.code === 'P2002' && err.meta?.target?.includes('rfc')) {
@@ -219,6 +267,7 @@ export async function createProvider(req, res, next) {
     next(err);
   }
 }
+
 
 export async function inactivateProvider(req, res, next) {
   try {
@@ -269,6 +318,14 @@ export async function inactivateProvider(req, res, next) {
       return updated;
     });
 
+    await logAudit(req, {
+      actorId: userId,
+      action: "PROVIDER_INACTIVATE",
+      entity: "Provider",
+      entityId: providerId,
+      meta: { reason, notes }
+    });
+
     res.json({
       message: 'Proveedor dado de baja exitosamente',
       provider: result,
@@ -295,6 +352,14 @@ export async function reactivateProvider(req, res, next) {
       },
     });
 
+    await logAudit(req, {
+  actorId: req.user?.id ?? null,
+  action: "PROVIDER_REACTIVATE",
+  entity: "Provider",
+  entityId: providerId,
+  meta: {}
+});
+
     res.json({
       message: 'Proveedor reactivado exitosamente',
       provider: updated,
@@ -311,7 +376,8 @@ export async function updateProvider(req, res, next) {
   try {
     const { id } = req.params;
     const providerId = parseInt(id);
-    
+    const actorId = req.user?.id ?? null;
+
     if (isNaN(providerId)) {
       return res.status(400).json({ message: 'ID de proveedor inválido' });
     }
@@ -319,11 +385,10 @@ export async function updateProvider(req, res, next) {
     const {
       businessName, emailContacto, telefono,
       direccionFiscal, observaciones, bankName, clabe,
-      rfc, newPassword // ✅ Nuevos campos
+      rfc, newPassword
     } = req.body;
 
     const result = await prisma.$transaction(async (tx) => {
-      // 1. Obtener proveedor con relaciones
       const provider = await tx.provider.findUnique({
         where: { id: providerId },
         include: { bankAccounts: true }
@@ -335,10 +400,19 @@ export async function updateProvider(req, res, next) {
         throw err;
       }
 
-      // 2. Verificar si el nuevo RFC ya existe (si cambió)
+      // snapshot antes
+      const before = {
+        businessName: provider.businessName,
+        rfc: provider.rfc,
+        emailContacto: provider.emailContacto,
+        telefono: provider.telefono,
+        direccionFiscal: provider.direccionFiscal,
+        observaciones: provider.observaciones,
+      };
+
       if (rfc && rfc !== provider.rfc) {
         const existingRfc = await tx.provider.findFirst({
-          where: { 
+          where: {
             rfc: rfc.toUpperCase(),
             id: { not: providerId }
           }
@@ -351,7 +425,7 @@ export async function updateProvider(req, res, next) {
         }
       }
 
-      // 3. Actualizar User (email y/o contraseña)
+      // Actualizar User
       if (emailContacto !== undefined || newPassword !== undefined) {
         const currentUser = await tx.user.findUnique({
           where: { email: provider.emailContacto }
@@ -360,10 +434,9 @@ export async function updateProvider(req, res, next) {
         if (currentUser) {
           const userUpdateData = {};
 
-          // Actualizar email si cambió
           if (emailContacto !== undefined && emailContacto !== provider.emailContacto) {
             const normalizedEmail = emailContacto.trim().toLowerCase();
-            
+
             const emailExists = await tx.user.findUnique({
               where: { email: normalizedEmail }
             });
@@ -377,10 +450,9 @@ export async function updateProvider(req, res, next) {
             userUpdateData.email = normalizedEmail;
           }
 
-          // Actualizar contraseña si se proporcionó
           if (newPassword) {
             userUpdateData.passwordHash = await hashPassword(newPassword);
-            userUpdateData.mustChangePassword = false; // ✅ Ya no forzar cambio
+            userUpdateData.mustChangePassword = false;
           }
 
           if (Object.keys(userUpdateData).length > 0) {
@@ -392,24 +464,24 @@ export async function updateProvider(req, res, next) {
         }
       }
 
-      // 4. Actualizar Provider (incluyendo RFC)
+      // Update Provider
       const updateProviderData = {};
       if (businessName !== undefined) updateProviderData.businessName = businessName.trim();
       if (emailContacto !== undefined) updateProviderData.emailContacto = emailContacto.trim().toLowerCase();
       if (telefono !== undefined) updateProviderData.telefono = telefono || null;
       if (direccionFiscal !== undefined) updateProviderData.direccionFiscal = direccionFiscal || null;
       if (observaciones !== undefined) updateProviderData.observaciones = observaciones || null;
-      if (rfc !== undefined) updateProviderData.rfc = rfc.toUpperCase(); // ✅ Actualizar RFC
+      if (rfc !== undefined) updateProviderData.rfc = rfc.toUpperCase();
 
       const updatedProvider = await tx.provider.update({
         where: { id: providerId },
         data: updateProviderData
       });
 
-      // 5. Actualizar o crear cuenta bancaria
+      // Bank account
       if (bankName !== undefined || clabe !== undefined) {
         const existingBankAccount = provider.bankAccounts[0];
-        
+
         if (existingBankAccount) {
           await tx.providerBankAccount.update({
             where: { id: existingBankAccount.id },
@@ -429,21 +501,53 @@ export async function updateProvider(req, res, next) {
         }
       }
 
-      // 6. Retornar proveedor actualizado con relaciones
+      const after = {
+        businessName: updatedProvider.businessName,
+        rfc: updatedProvider.rfc,
+        emailContacto: updatedProvider.emailContacto,
+        telefono: updatedProvider.telefono,
+        direccionFiscal: updatedProvider.direccionFiscal,
+        observaciones: updatedProvider.observaciones,
+      };
+
+      const changed = {};
+      for (const k of Object.keys(after)) {
+        if (before[k] !== after[k]) changed[k] = { from: before[k], to: after[k] };
+      }
+      if (newPassword) changed.password = { from: "****", to: "****" };
+      if (bankName !== undefined || clabe !== undefined) changed.bankAccount = true;
+
+      // ✅ Audit TX
+      await tx.auditLog.create({
+        data: {
+          actorId,
+          action: "PROVIDER_UPDATE",
+          entity: "Provider",
+          entityId: updatedProvider.id,
+          meta: { providerId: updatedProvider.id, changes: changed }
+        }
+      });
+
       return await tx.provider.findUnique({
         where: { id: providerId },
         include: { bankAccounts: true }
       });
 
-    }, {
-      maxWait: 10000,
-      timeout: 15000,
+    }, { maxWait: 10000, timeout: 15000 });
+
+    // ✅ Audit extra con ip/ua
+    await logAudit(req, {
+      actorId,
+      action: "PROVIDER_UPDATE",
+      entity: "Provider",
+      entityId: providerId,
+      meta: { providerId, changedFields: Object.keys(req.body || {}) }
     });
 
     res.json({
       message: 'Proveedor actualizado exitosamente',
       provider: result,
-      passwordUpdated: !!newPassword // ✅ Indicar si se actualizó contraseña
+      passwordUpdated: !!newPassword
     });
   } catch (err) {
     console.error('Error en updateProvider:', err);
@@ -468,7 +572,7 @@ export async function getProviderById(req, res, next) {
   try {
     const { id } = req.params;
     const providerId = parseInt(id);
-    
+
     if (isNaN(providerId)) {
       return res.status(400).json({ message: 'ID de proveedor inválido' });
     }
@@ -500,9 +604,9 @@ export async function getMyProviderData(req, res, next) {
 
     // Buscar proveedor por email de contacto
     const provider = await prisma.provider.findFirst({
-      where: { 
+      where: {
         emailContacto: userEmail,
-        isActive: true 
+        isActive: true
       },
       include: {
         bankAccounts: {
@@ -516,8 +620,8 @@ export async function getMyProviderData(req, res, next) {
     });
 
     if (!provider) {
-      return res.status(404).json({ 
-        error: 'No se encontró información del proveedor' 
+      return res.status(404).json({
+        error: 'No se encontró información del proveedor'
       });
     }
 
@@ -538,19 +642,19 @@ export async function getMyProviderData(req, res, next) {
       businessName: provider.businessName || '',
       rfc: provider.rfc || '',
       fiscalAddress: provider.direccionFiscal || '',
-      
+
       // Datos de Contacto
       fullName: user?.fullName || '',
       contactPosition: provider.contactPosition || '',
       email: userEmail,
       phone: user?.phone || provider.telefono || '',
       deliveryAddress: provider.direccionFiscal || '', // usamos la misma dirección fiscal
-      
+
       // Datos Bancarios
       clabe: provider.bankAccounts[0]?.clabe || '',
       bankName: provider.bankAccounts[0]?.bankName || '',
       bankAccountId: provider.bankAccounts[0]?.id || null,
-      
+
       // IDs
       providerId: provider.id
     };
@@ -572,12 +676,12 @@ export async function updateMyProviderData(req, res, next) {
       businessName,
       rfc,
       fiscalAddress,
-      
+
       // Datos de Contacto
       fullName,
       contactPosition,
       phone,
-      
+
       // Datos Bancarios
       clabe,
       bankName,
@@ -586,9 +690,9 @@ export async function updateMyProviderData(req, res, next) {
 
     // Buscar proveedor por email
     const provider = await prisma.provider.findFirst({
-      where: { 
+      where: {
         emailContacto: userEmail,
-        isActive: true 
+        isActive: true
       },
       include: { bankAccounts: true }
     });
@@ -600,12 +704,12 @@ export async function updateMyProviderData(req, res, next) {
     // Verificar si el RFC ya existe (si cambió)
     if (rfc && rfc !== provider.rfc) {
       const existingRfc = await prisma.provider.findFirst({
-        where: { 
+        where: {
           rfc,
           id: { not: provider.id }
         }
       });
-      
+
       if (existingRfc) {
         return res.status(400).json({ error: 'El RFC ya está registrado por otro proveedor' });
       }
@@ -640,7 +744,7 @@ export async function updateMyProviderData(req, res, next) {
       if (clabe && bankName) {
         // Verificar si la CLABE ya existe
         const clabeExists = await tx.providerBankAccount.findFirst({
-          where: { 
+          where: {
             clabe,
             ...(bankAccountId && { id: { not: bankAccountId } })
           }
@@ -672,24 +776,24 @@ export async function updateMyProviderData(req, res, next) {
       timeout: 15000
     });
 
-    res.json({ 
+    res.json({
       message: 'Datos actualizados correctamente',
-      success: true 
+      success: true
     });
   } catch (error) {
     console.error('Error al actualizar datos del proveedor:', error);
-    
+
     if (error.message === 'CLABE_EXISTS') {
       return res.status(400).json({ error: 'La CLABE interbancaria ya esta registrada con un proveedor' });
     }
-    
+
     if (error.code === 'P2002') {
       const field = error.meta?.target?.[0];
       if (field === 'rfc') {
         return res.status(400).json({ error: 'El RFC ya está registrado' });
       }
     }
-    
+
     res.status(500).json({ error: 'Error al actualizar los datos' });
   }
 }
@@ -703,11 +807,11 @@ export async function getAdminProvidersTable(req, res, next) {
         isActive: true,
         ...(q
           ? {
-              OR: [
-                { businessName: { contains: q, mode: 'insensitive' } },
-                { rfc: { contains: q, mode: 'insensitive' } },
-              ],
-            }
+            OR: [
+              { businessName: { contains: q, mode: 'insensitive' } },
+              { rfc: { contains: q, mode: 'insensitive' } },
+            ],
+          }
           : {}),
       },
       orderBy: { createdAt: 'desc' },

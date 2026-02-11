@@ -1,6 +1,8 @@
+// src/controllers/documentReview.controller.js
 import { prisma } from '../config/prisma.js';
 import path from 'path';
 import { sendDocumentApprovedEmail, sendDocumentRejectedEmail } from '../utils/email.js';
+import { logAudit } from "../utils/audit.js";
 
 export async function getPendingDocuments(req, res) {
   try {
@@ -12,7 +14,6 @@ export async function getPendingDocuments(req, res) {
     }
 
     if (search) {
-      // Filtro correcto para relación requerida (provider)
       where.provider = {
         is: {
           OR: [
@@ -38,7 +39,7 @@ export async function getPendingDocuments(req, res) {
           }
         },
         documentType: {
-            select: { id: true, code: true, name: true, description: true }
+          select: { id: true, code: true, name: true, description: true }
         },
         uploadedBy: { select: { id: true, fullName: true, email: true } },
         reviewedBy: { select: { id: true, fullName: true, email: true } }
@@ -80,18 +81,17 @@ export async function approveDocument(req, res) {
       await tx.auditLog.create({
         data: {
           actorId: userId,
-            action: 'APPROVE_DOCUMENT',
-            entity: 'ProviderDocument',
-            entityId: doc.id,
-            meta: {
-              providerId: doc.providerId,
-              documentType: doc.documentType.name,
-              providerName: doc.provider.businessName
-            }
+          action: 'APPROVE_DOCUMENT',
+          entity: 'ProviderDocument',
+          entityId: doc.id,
+          meta: {
+            providerId: doc.providerId,
+            documentType: doc.documentType.name,
+            providerName: doc.provider.businessName
+          }
         }
       });
 
-      // Solo si hay personType definido
       if (doc.provider.personType) {
         const requiredDocs = await tx.documentType.findMany({
           where: {
@@ -115,16 +115,27 @@ export async function approveDocument(req, res) {
       return doc;
     });
 
+    // ✅ AUDIT extra con ip/ua
+    await logAudit(req, {
+      actorId: userId,
+      action: "DOC_REVIEW_APPROVE",
+      entity: "ProviderDocument",
+      entityId: updatedDocument.id,
+      meta: {
+        providerId: updatedDocument.providerId,
+        documentType: updatedDocument.documentType?.name,
+        providerName: updatedDocument.provider?.businessName
+      }
+    });
+
     // Crear notificación y enviar email
     try {
       if (updatedDocument.provider.emailContacto) {
-        // Obtener el usuario (proveedor) por email
         const providerUser = await prisma.user.findUnique({
           where: { email: updatedDocument.provider.emailContacto }
         });
 
         if (providerUser) {
-          // Crear notificación con el userId correcto
           await prisma.notification.create({
             data: {
               userId: providerUser.id,
@@ -138,7 +149,6 @@ export async function approveDocument(req, res) {
           }).catch(() => {});
         }
 
-        // Enviar email
         if (String(process.env.MAILER_DISABLED || 'false') !== 'true') {
           await sendDocumentApprovedEmail(updatedDocument.provider.emailContacto, updatedDocument.documentType.name, updatedDocument.provider.businessName).catch((e) => console.error('Email error:', e.message));
         } else {
@@ -208,16 +218,28 @@ export async function rejectDocument(req, res) {
       return doc;
     });
 
+    // ✅ AUDIT extra con ip/ua
+    await logAudit(req, {
+      actorId: userId,
+      action: "DOC_REVIEW_REJECT",
+      entity: "ProviderDocument",
+      entityId: updatedDocument.id,
+      meta: {
+        providerId: updatedDocument.providerId,
+        documentType: updatedDocument.documentType?.name,
+        providerName: updatedDocument.provider?.businessName,
+        reason: reason.trim()
+      }
+    });
+
     // Crear notificación y enviar email
     try {
       if (updatedDocument.provider.emailContacto) {
-        // Obtener el usuario (proveedor) por email
         const providerUser = await prisma.user.findUnique({
           where: { email: updatedDocument.provider.emailContacto }
         });
 
         if (providerUser) {
-          // Crear notificación con el userId correcto
           await prisma.notification.create({
             data: {
               userId: providerUser.id,
@@ -231,7 +253,6 @@ export async function rejectDocument(req, res) {
           }).catch(() => {});
         }
 
-        // Enviar email
         if (String(process.env.MAILER_DISABLED || 'false') !== 'true') {
           await sendDocumentRejectedEmail(updatedDocument.provider.emailContacto, updatedDocument.documentType.name, reason.trim()).catch((e) => console.error('Email error:', e.message));
         } else {
@@ -252,6 +273,7 @@ export async function rejectDocument(req, res) {
 export async function downloadDocument(req, res) {
   try {
     const { documentId } = req.params;
+
     const document = await prisma.providerDocument.findUnique({
       where: { id: parseInt(documentId) },
       include: { provider: true, documentType: true }
@@ -260,20 +282,23 @@ export async function downloadDocument(req, res) {
     if (!document) return res.status(404).json({ error: 'Documento no encontrado' });
     if (!document.storageKey) return res.status(404).json({ error: 'Archivo no encontrado' });
 
-    // Verificar si es URL de Supabase
+    // ✅ AUDIT download
+    await logAudit(req, {
+      actorId: req.user?.id ?? null,
+      action: "DOC_DOWNLOAD",
+      entity: "ProviderDocument",
+      entityId: document.id,
+      meta: { providerId: document.providerId, documentType: document.documentType?.name }
+    });
+
     if (document.fileUrl && document.fileUrl.includes('supabase')) {
-      // Redirigir a la URL de Supabase
       return res.redirect(document.fileUrl);
     }
 
-    // Si no es Supabase, buscar en sistema local
     const filepath = path.join(process.cwd(), 'uploads', 'provider-documents', document.providerId.toString(), document.storageKey);
     const fs = await import('fs/promises');
-    try { 
-      await fs.access(filepath); 
-    } catch { 
-      return res.status(404).json({ error: 'Archivo físico no existe' }); 
-    }
+    try { await fs.access(filepath); }
+    catch { return res.status(404).json({ error: 'Archivo físico no existe' }); }
 
     const downloadName = `${document.provider.businessName.replace(/\s+/g, '_')}_${document.documentType.code}.pdf`;
     res.download(filepath, downloadName, (err) => {
