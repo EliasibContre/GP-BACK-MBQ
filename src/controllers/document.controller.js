@@ -80,11 +80,13 @@ export async function uploadDocuments(req, res) {
   try {
     const userEmail = req.user.email;
     const userId = req.user.id;
-    const { personType } = req.body;
+    const personTypeRaw = req.body?.personType;
+    const personType = String(personTypeRaw || "").trim().toUpperCase();
 
-    if (!personType || !['FISICA', 'MORAL'].includes(personType)) {
+    if (!personType || !["FISICA", "MORAL"].includes(personType)) {
       return res.status(400).json({
-        error: 'Tipo de persona inválido. Debe ser FISICA o MORAL'
+        error: "Tipo de persona inválido. Debe ser FISICA o MORAL",
+        received: personTypeRaw ?? null,
       });
     }
 

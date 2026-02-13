@@ -1,3 +1,4 @@
+// routes/document.routes.js
 import { Router } from 'express';
 import multer from 'multer';
 import { requireAuth } from '../middlewares/requireAuth.js';
