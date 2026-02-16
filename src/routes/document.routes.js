@@ -2,6 +2,7 @@
 import { Router } from 'express';
 import multer from 'multer';
 import { requireAuth } from '../middlewares/requireAuth.js';
+import { multerErrorHandler } from '../middlewares/multerErrorHandler.js';
 import {
   getDocumentTypes,
   getMyDocuments,
@@ -35,6 +36,7 @@ router.post(
   '/me',
   requireAuth,
   upload.any(), // Acepta cualquier cantidad de archivos con diferentes nombres
+  multerErrorHandler, // Manejar errores de multer
   uploadDocuments
 );
 

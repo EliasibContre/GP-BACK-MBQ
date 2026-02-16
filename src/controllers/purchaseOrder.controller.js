@@ -1,10 +1,10 @@
+// src/controllers/purchaseOrder.controller.js
 import { prisma } from '../config/prisma.js';
 import { sendPurchaseOrderApprovedEmail, sendPurchaseOrderRejectedEmail } from '../utils/email.js';
-import { uploadToSupabase, deleteFromSupabase, getPublicUrl } from '../config/supabase.js';
-import fs from 'fs/promises';
+import { uploadToSupabase, deleteFromSupabase } from '../config/supabase.js';
 import path from 'path';
 
-// Crear orden de compra (proveedor)
+// Crear orden de compra (proveedor) - MULTI FACTURAS
 export async function createPurchaseOrder(req, res) {
   try {
     const userId = req.user.id;
@@ -20,101 +20,167 @@ export async function createPurchaseOrder(req, res) {
     if (existingPO) return res.status(400).json({ error: 'El número de orden ya existe' });
 
     // Archivos
-    const orderFile = req.files?.archivoOrden?.[0];
-    const invoicePdfFile = req.files?.archivoFacturaPdf?.[0];
-    const invoiceXmlFile = req.files?.archivoFacturaXml?.[0];
+    const orderFile = req.files?.archivoOrden?.[0] || null;
+    const invoicePdfFiles = req.files?.archivoFacturaPdf || [];
+    const invoiceXmlFiles = req.files?.archivoFacturaXml || [];
 
     if (!orderFile) return res.status(400).json({ error: 'El PDF de la orden es obligatorio' });
-    if (!invoicePdfFile) return res.status(400).json({ error: 'El PDF de la factura es obligatorio' });
-    if (!invoiceXmlFile) return res.status(400).json({ error: 'El XML de la factura es obligatorio' });
+
+    // Debe haber al menos 1 PDF y 1 XML
+    if (invoicePdfFiles.length === 0) return res.status(400).json({ error: 'Debe subir al menos un PDF de factura' });
+    if (invoiceXmlFiles.length === 0) return res.status(400).json({ error: 'Debe subir al menos un XML de factura' });
+
+    // Deben venir pareados (mismas cantidades)
+    if (invoicePdfFiles.length !== invoiceXmlFiles.length) {
+      return res.status(400).json({
+        error: 'La cantidad de facturas PDF debe ser igual a la cantidad de facturas XML',
+        pdfCount: invoicePdfFiles.length,
+        xmlCount: invoiceXmlFiles.length
+      });
+    }
 
     const ts = Date.now();
 
-    // Subir Orden de Compra a Supabase Storage
+    // Vamos a subir a storage primero, y si algo falla, hacemos rollback
+    const uploadedKeys = []; // { bucket, key }
+    const uploadedInvoices = []; // { pdfUrl, pdfStorageKey, xmlUrl, xmlStorageKey }
+
+    // 1) Subir Orden de Compra a Supabase Storage (purchase-orders)
     const orderFilename = `PO_${numeroOrden}_${ts}.pdf`;
     const orderPath = `${provider.id}/${orderFilename}`;
+
     let pdfUrl = null;
     let storageKey = null;
+
     try {
-      const orderUpload = await uploadToSupabase('purchase-orders', orderPath, orderFile.buffer, 'application/pdf');
+      const orderUpload = await uploadToSupabase(
+        'purchase-orders',
+        orderPath,
+        orderFile.buffer,
+        'application/pdf'
+      );
       pdfUrl = orderUpload.url;
       storageKey = orderUpload.path;
+      uploadedKeys.push({ bucket: 'purchase-orders', key: orderUpload.path });
     } catch (e) {
       console.error('Error subiendo Orden de Compra a Supabase:', e.message || e);
       return res.status(502).json({ error: 'Error subiendo archivo de orden de compra', detail: e.message || String(e) });
     }
 
-    // Subir Factura PDF a Supabase Storage
-    let invoicePdfUrl = null;
-    let invoiceStorageKey = null;
-    let invoiceXmlUrl = null;
-    let invoiceXmlStorageKey = null;
-    let invoiceUploadedAt = null;
+    // 2) Subir N facturas (PDF + XML) a Supabase Storage (invoices)
+    try {
+      for (let i = 0; i < invoicePdfFiles.length; i++) {
+        const pdfF = invoicePdfFiles[i];
+        const xmlF = invoiceXmlFiles[i];
 
-    if (invoicePdfFile) {
-      const invoicePdfFilename = `FAC_${numeroOrden}_${ts}.pdf`;
-      const invoicePdfPath = `${provider.id}/${invoicePdfFilename}`;
-      try {
-        const invoicePdfUpload = await uploadToSupabase('invoices', invoicePdfPath, invoicePdfFile.buffer, 'application/pdf');
-        invoicePdfUrl = invoicePdfUpload.url;
-        invoiceStorageKey = invoicePdfUpload.path;
-        invoiceUploadedAt = new Date();
-      } catch (e) {
-        console.error('Error subiendo Factura PDF a Supabase:', e.message || e);
-        return res.status(502).json({ error: 'Error subiendo archivo de factura (PDF)', detail: e.message || String(e) });
+        const idx = i + 1;
+
+        const pdfName = `FAC_${numeroOrden}_${ts}_${idx}.pdf`;
+        const xmlName = `FAC_${numeroOrden}_${ts}_${idx}.xml`;
+
+        const pdfPath = `${provider.id}/${pdfName}`;
+        const xmlPath = `${provider.id}/${xmlName}`;
+
+        const upPdf = await uploadToSupabase('invoices', pdfPath, pdfF.buffer, 'application/pdf');
+        uploadedKeys.push({ bucket: 'invoices', key: upPdf.path });
+
+        const upXml = await uploadToSupabase('invoices', xmlPath, xmlF.buffer, 'application/xml');
+        uploadedKeys.push({ bucket: 'invoices', key: upXml.path });
+
+        uploadedInvoices.push({
+          pdfUrl: upPdf.url,
+          pdfStorageKey: upPdf.path,
+          xmlUrl: upXml.url,
+          xmlStorageKey: upXml.path
+        });
       }
-    }
+    } catch (e) {
+      console.error('Error subiendo facturas a Supabase:', e.message || e);
 
-    // Subir Factura XML a Supabase Storage
-    if (invoiceXmlFile) {
-      const invoiceXmlFilename = `FAC_${numeroOrden}_${ts}.xml`;
-      const invoiceXmlPath = `${provider.id}/${invoiceXmlFilename}`;
-      try {
-        const invoiceXmlUpload = await uploadToSupabase('invoices', invoiceXmlPath, invoiceXmlFile.buffer, 'application/xml');
-        invoiceXmlUrl = invoiceXmlUpload.url;
-        invoiceXmlStorageKey = invoiceXmlUpload.path;
-      } catch (e) {
-        console.error('Error subiendo Factura XML a Supabase:', e.message || e);
-        return res.status(502).json({ error: 'Error subiendo archivo de factura (XML)', detail: e.message || String(e) });
-      }
-    }
-
-    const purchaseOrder = await prisma.purchaseOrder.create({
-      data: {
-        number: numeroOrden,
-        providerId: provider.id,
-        status: 'DRAFT',
-        total: parseFloat(monto),
-        issuedAt: new Date(fecha),
-        obervations: observaciones || null,
-        pdfUrl,
-        storageKey,
-        invoicePdfUrl,
-        invoiceStorageKey,
-        invoiceXmlUrl,
-        invoiceXmlStorageKey,
-        invoiceUploadedAt,
-        createdById: userId
-      },
-      include: {
-        provider: { select: { businessName: true, rfc: true } }
-      }
-    });
-
-    await prisma.auditLog.create({
-      data: {
-        actorId: userId,
-        action: 'CREATE_PURCHASE_ORDER',
-        entity: 'PurchaseOrder',
-        entityId: purchaseOrder.id,
-        meta: {
-          number: numeroOrden,
-          provider: provider.businessName,
-          total: monto,
-          invoicePdf: invoiceStorageKey,
-          invoiceXml: invoiceXmlStorageKey
+      // Rollback de TODO lo subido (incluida la orden)
+      for (const k of uploadedKeys.reverse()) {
+        try { await deleteFromSupabase(k.bucket, k.key); } catch (er) {
+          console.warn('No se pudo eliminar en rollback:', k.bucket, k.key, er.message || er);
         }
       }
+
+      return res.status(502).json({ error: 'Error subiendo archivos de facturas', detail: e.message || String(e) });
+    }
+
+    // Compatibilidad: guardar la primera factura en los campos legacy
+    const firstInv = uploadedInvoices[0];
+    const invoiceUploadedAt = new Date();
+
+    // 3) Guardar en BD en transacción
+    const purchaseOrder = await prisma.$transaction(async (tx) => {
+      const po = await tx.purchaseOrder.create({
+        data: {
+          number: numeroOrden,
+          providerId: provider.id,
+          status: 'DRAFT',
+          total:String(monto),
+          issuedAt: new Date(fecha),
+          obervations: observaciones || null,
+
+          pdfUrl,
+          storageKey,
+
+          // legacy (primera factura)
+          invoicePdfUrl: firstInv?.pdfUrl || null,
+          invoiceStorageKey: firstInv?.pdfStorageKey || null,
+          invoiceXmlUrl: firstInv?.xmlUrl || null,
+          invoiceXmlStorageKey: firstInv?.xmlStorageKey || null,
+          invoiceUploadedAt,
+
+          createdById: userId
+        },
+        include: {
+          provider: { select: { businessName: true, rfc: true } }
+        }
+      });
+
+      // crear N registros de invoices hijas
+      await tx.purchaseOrderInvoice.createMany({
+        data: uploadedInvoices.map((inv) => ({
+          purchaseOrderId: po.id,
+          pdfUrl: inv.pdfUrl,
+          pdfStorageKey: inv.pdfStorageKey,
+          xmlUrl: inv.xmlUrl,
+          xmlStorageKey: inv.xmlStorageKey
+        }))
+      });
+
+      // Auditoría
+      await tx.auditLog.create({
+        data: {
+          actorId: userId,
+          action: 'CREATE_PURCHASE_ORDER',
+          entity: 'PurchaseOrder',
+          entityId: po.id,
+          meta: {
+            number: numeroOrden,
+            provider: provider.businessName,
+            total: monto,
+            orderStorageKey: storageKey,
+            invoicesCount: uploadedInvoices.length,
+            invoices: uploadedInvoices.map((x) => ({
+              pdf: x.pdfStorageKey,
+              xml: x.xmlStorageKey
+            }))
+          }
+        }
+      });
+
+      // devolver PO con poInvoices
+      const poFull = await tx.purchaseOrder.findUnique({
+        where: { id: po.id },
+        include: {
+          provider: { select: { businessName: true, rfc: true } },
+          poInvoices: true
+        }
+      });
+
+      return poFull;
     });
 
     res.status(201).json({
@@ -142,21 +208,17 @@ export async function getMyPurchaseOrders(req, res) {
     if (!provider) {
       return res.status(404).json({ error: 'Proveedor no encontrado' });
     }
+
     const orders = await prisma.purchaseOrder.findMany({
       where: { providerId: provider.id },
       include: {
         provider: {
-          select: {
-            businessName: true,
-            rfc: true
-          }
+          select: { businessName: true, rfc: true }
         },
         createdBy: {
-          select: {
-            fullName: true,
-            email: true
-          }
-        }
+          select: { fullName: true, email: true }
+        },
+        poInvoices: true // ✅ NUEVO
       },
       orderBy: { createdAt: 'desc' }
     });
@@ -186,7 +248,8 @@ export async function getPendingApprovalPurchaseOrders(req, res) {
       take: take + 1,
       include: {
         provider: { select: { businessName: true, rfc: true } },
-        createdBy: { select: { id: true, fullName: true, email: true } }
+        createdBy: { select: { id: true, fullName: true, email: true } },
+        poInvoices: true // ✅ NUEVO
       }
     };
     if (cursor) query.cursor = { id: Number(cursor) };

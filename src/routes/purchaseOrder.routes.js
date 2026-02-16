@@ -2,6 +2,7 @@ import { Router } from 'express';
 import multer from 'multer';
 import { requireAuth } from '../middlewares/requireAuth.js';
 import { requireRole } from '../middlewares/requireRole.js';
+import { multerErrorHandler } from '../middlewares/multerErrorHandler.js';
 import validate from '../middlewares/validate.js';
 import {
   createPurchaseOrder,
@@ -42,9 +43,10 @@ router.post(
   requireAuth,
   upload.fields([
     { name: 'archivoOrden', maxCount: 1 },
-    { name: 'archivoFacturaPdf', maxCount: 1 },
-    { name: 'archivoFacturaXml', maxCount: 1 }
+    { name: 'archivoFacturaPdf', maxCount: 10 },
+    { name: 'archivoFacturaXml', maxCount: 10 }
   ]),
+  multerErrorHandler,
   validate(createPurchaseOrderSchema),
   createPurchaseOrder
 );

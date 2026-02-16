@@ -241,9 +241,27 @@ model PurchaseOrder {
   createdBy            User                @relation("POCreatedBy", fields: [createdById], references: [id])
   provider             Provider            @relation(fields: [providerId], references: [id])
   items                PurchaseOrderItem[]
+   poInvoices          PurchaseOrderInvoice[]
 
   @@index([providerId, status])
 }
+
+model PurchaseOrderInvoice {
+  id              Int      @id @default(autoincrement())
+  purchaseOrderId Int
+
+  pdfUrl          String?
+  pdfStorageKey   String?
+  xmlUrl          String?
+  xmlStorageKey   String?
+
+  uploadedAt      DateTime @default(now())
+
+  purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+
+  @@index([purchaseOrderId])
+}
+
 
 model PurchaseOrderItem {
   id              Int           @id @default(autoincrement())
