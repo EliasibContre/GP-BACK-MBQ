@@ -1,3 +1,4 @@
+// src/routes/purchaseOrder.routes.js
 import { Router } from 'express';
 import multer from 'multer';
 import { requireAuth } from '../middlewares/requireAuth.js';
@@ -10,9 +11,16 @@ import {
   getPendingApprovalPurchaseOrders,
   listPurchaseOrders,
   listApprovedForSessionProvider,
-  listApprovedUnpaidPurchaseOrders
+  listApprovedUnpaidPurchaseOrders,
+  approvePurchaseOrder,
+  rejectPurchaseOrder,
+  markReceivedPurchaseOrder,
+
+  // ✅ NUEVOS (PROVEEDOR)
+  updatePurchaseOrder,
+  submitPurchaseOrder,
+  deletePurchaseOrder,
 } from '../controllers/purchaseOrder.controller.js';
-import { approvePurchaseOrder, rejectPurchaseOrder, markReceivedPurchaseOrder } from '../controllers/purchaseOrder.controller.js';
 import { createPurchaseOrderSchema } from '../schemas/purchaseOrder.schema.js';
 
 const router = Router();
@@ -52,6 +60,34 @@ router.post(
 );
 
 router.get('/me', requireAuth, getMyPurchaseOrders);
+
+// ✅ PROVEEDOR: editar orden (solo DRAFT)
+router.patch(
+  '/:id',
+  requireAuth,
+  upload.fields([
+    { name: 'archivoOrden', maxCount: 1 },
+    { name: 'archivoFacturaPdf', maxCount: 10 },
+    { name: 'archivoFacturaXml', maxCount: 10 }
+  ]),
+  multerErrorHandler,
+  updatePurchaseOrder
+);
+
+// ✅ PROVEEDOR: enviar a revisión (DRAFT -> SENT)
+router.post(
+  '/:id/submit',
+  requireAuth,
+  submitPurchaseOrder
+);
+
+// ✅ PROVEEDOR: eliminar orden (solo DRAFT)
+router.delete(
+  '/:id',
+  requireAuth,
+  deletePurchaseOrder
+);
+
 
 // Endpoint para aprobadores/administradores: obtener órdenes pendientes de aprobación
 router.get('/pending-approval', requireAuth, requireRole(['APPROVER','ADMIN']), getPendingApprovalPurchaseOrders);

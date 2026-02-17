@@ -118,7 +118,7 @@ export async function createPurchaseOrder(req, res) {
           number: numeroOrden,
           providerId: provider.id,
           status: 'DRAFT',
-          total:String(monto),
+          total: String(monto),
           issuedAt: new Date(fecha),
           obervations: observaciones || null,
 
@@ -199,9 +199,9 @@ export async function getMyPurchaseOrders(req, res) {
     const userEmail = req.user.email;
 
     const provider = await prisma.provider.findFirst({
-      where: { 
+      where: {
         emailContacto: userEmail,
-        isActive: true 
+        isActive: true
       }
     });
 
@@ -233,15 +233,13 @@ export async function getMyPurchaseOrders(req, res) {
 // Obtener órdenes pendientes de aprobación (para aprobadores/administradores)
 export async function getPendingApprovalPurchaseOrders(req, res) {
   try {
-    const { status, limit = 50, cursor } = req.query;
-    let statuses = [];
-    if (status) {
-      statuses = String(status).split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
-    } else {
-      statuses = ['DRAFT', 'SENT'];
-    }
+    const { limit = 50, cursor } = req.query;
+
+    // ✅ Regla: SOLO órdenes enviadas a revisión
+    const statuses = ['SENT'];
 
     const take = Math.min(Number(limit) || 50, 200);
+
     const query = {
       where: { status: { in: statuses } },
       orderBy: { createdAt: 'desc' },
@@ -249,7 +247,7 @@ export async function getPendingApprovalPurchaseOrders(req, res) {
       include: {
         provider: { select: { businessName: true, rfc: true } },
         createdBy: { select: { id: true, fullName: true, email: true } },
-        poInvoices: true // ✅ NUEVO
+        poInvoices: true
       }
     };
     if (cursor) query.cursor = { id: Number(cursor) };
@@ -272,8 +270,9 @@ export async function approvePurchaseOrder(req, res) {
     const approverId = req.user?.id;
     const po = await prisma.purchaseOrder.findUnique({ where: { id } });
     if (!po) return res.status(404).json({ error: 'Orden no encontrada' });
-    if (!(po.status === 'DRAFT' || po.status === 'SENT')) return res.status(400).json({ error: 'Orden no puede aprobarse en su estado actual' });
-
+    if (po.status !== 'SENT') {
+      return res.status(400).json({ error: 'Solo se pueden aprobar órdenes en estado SENT' });
+    }
     const updated = await prisma.purchaseOrder.update({
       where: { id },
       data: { status: 'APPROVED', approvedById: approverId, approvedAt: new Date() },
@@ -286,15 +285,17 @@ export async function approvePurchaseOrder(req, res) {
     try {
       const recipientUserId = updated.createdById || (updated.createdBy ? updated.createdBy.id : null);
       if (recipientUserId) {
-        await prisma.notification.create({ data: {
-          userId: recipientUserId,
-          type: 'PO_APPROVED',
-          entityType: 'PURCHASE_ORDER',
-          entityId: id,
-          title: 'Orden Aprobada',
-          message: `Tu orden ${updated.number} ha sido aprobada.`,
-          data: { number: updated.number, total: updated.total ? String(updated.total) : null }
-        }});
+        await prisma.notification.create({
+          data: {
+            userId: recipientUserId,
+            type: 'PO_APPROVED',
+            entityType: 'PURCHASE_ORDER',
+            entityId: id,
+            title: 'Orden Aprobada',
+            message: `Tu orden ${updated.number} ha sido aprobada.`,
+            data: { number: updated.number, total: updated.total ? String(updated.total) : null }
+          }
+        });
       }
 
       // Enviar correo al contacto del proveedor si existe
@@ -339,15 +340,17 @@ export async function rejectPurchaseOrder(req, res) {
     try {
       const recipientUserId = updated.createdById || (updated.createdBy ? updated.createdBy.id : null);
       if (recipientUserId) {
-        await prisma.notification.create({ data: {
-          userId: recipientUserId,
-          type: 'PO_REJECTED',
-          entityType: 'PURCHASE_ORDER',
-          entityId: id,
-          title: 'Orden Rechazada',
-          message: `Tu orden ${updated.number} ha sido rechazada. Motivo: ${reason}`,
-          data: { number: updated.number, reason }
-        }});
+        await prisma.notification.create({
+          data: {
+            userId: recipientUserId,
+            type: 'PO_REJECTED',
+            entityType: 'PURCHASE_ORDER',
+            entityId: id,
+            title: 'Orden Rechazada',
+            message: `Tu orden ${updated.number} ha sido rechazada. Motivo: ${reason}`,
+            data: { number: updated.number, reason }
+          }
+        });
       }
 
       const providerEmail = updated.provider?.emailContacto;
@@ -498,5 +501,349 @@ export async function listApprovedUnpaidPurchaseOrders(req, res) {
   } catch (error) {
     console.error('Error listApprovedUnpaidPurchaseOrders:', error);
     res.status(500).json({ error: 'Error al listar órdenes aprobadas sin pago', detail: error.message });
+  }
+}
+
+export async function submitPurchaseOrder(req, res) {
+  try {
+    const id = Number(req.params.id);
+    const userId = req.user?.id;
+    const userEmail = req.user?.email;
+
+    const provider = await prisma.provider.findFirst({
+      where: { emailContacto: userEmail, isActive: true, deletedAt: null },
+      select: { id: true }
+    });
+    if (!provider) return res.status(404).json({ error: 'Proveedor no encontrado' });
+
+    const po = await prisma.purchaseOrder.findUnique({ where: { id } });
+    if (!po) return res.status(404).json({ error: 'Orden no encontrada' });
+
+    if (po.providerId !== provider.id) {
+      return res.status(403).json({ error: 'No autorizado' });
+    }
+
+    if (po.status !== 'DRAFT') {
+      return res.status(400).json({ error: 'Solo se pueden enviar órdenes en DRAFT' });
+    }
+
+    const updated = await prisma.purchaseOrder.update({
+      where: { id },
+      data: { status: 'SENT' }
+    });
+
+    await prisma.auditLog.create({
+      data: {
+        actorId: userId,
+        action: 'SUBMIT_PURCHASE_ORDER',
+        entity: 'PurchaseOrder',
+        entityId: id,
+        meta: { from: 'DRAFT', to: 'SENT' }
+      }
+    });
+
+    return res.json({ message: 'Orden enviada a revisión correctamente', data: updated });
+  } catch (error) {
+    console.error('Error submitPurchaseOrder:', error);
+    return res.status(500).json({ error: 'Error al enviar orden' });
+  }
+}
+
+
+export async function deletePurchaseOrder(req, res) {
+  try {
+    const id = Number(req.params.id);
+    const userId = req.user?.id;
+    const userEmail = req.user?.email;
+
+    const provider = await prisma.provider.findFirst({
+      where: { emailContacto: userEmail, isActive: true, deletedAt: null },
+      select: { id: true, businessName: true }
+    });
+    if (!provider) return res.status(404).json({ error: 'Proveedor no encontrado' });
+
+    const po = await prisma.purchaseOrder.findUnique({
+      where: { id },
+      include: { poInvoices: true }
+    });
+    if (!po) return res.status(404).json({ error: 'Orden no encontrada' });
+
+    if (po.providerId !== provider.id) {
+      return res.status(403).json({ error: 'No autorizado' });
+    }
+
+    if (po.status !== 'DRAFT') {
+      return res.status(400).json({ error: 'Solo se pueden eliminar órdenes en DRAFT' });
+    }
+
+    // Recolectar keys para borrar en storage (best effort)
+    const keysPurchaseOrders = [];
+    const keysInvoices = [];
+
+    if (po.storageKey) keysPurchaseOrders.push(po.storageKey);
+
+    // legacy invoice fields (por compat)
+    if (po.invoiceStorageKey) keysInvoices.push(po.invoiceStorageKey);
+    if (po.invoiceXmlStorageKey) keysInvoices.push(po.invoiceXmlStorageKey);
+
+    // hijas
+    for (const inv of (po.poInvoices || [])) {
+      if (inv.pdfStorageKey) keysInvoices.push(inv.pdfStorageKey);
+      if (inv.xmlStorageKey) keysInvoices.push(inv.xmlStorageKey);
+    }
+
+    // Dedup
+    const uniq = (arr) => [...new Set(arr.filter(Boolean))];
+
+    await prisma.$transaction(async (tx) => {
+      await tx.purchaseOrderInvoice.deleteMany({ where: { purchaseOrderId: id } });
+      await tx.purchaseOrder.delete({ where: { id } });
+
+      await tx.auditLog.create({
+        data: {
+          actorId: userId,
+          action: 'DELETE_PURCHASE_ORDER',
+          entity: 'PurchaseOrder',
+          entityId: id,
+          meta: {
+            number: po.number,
+            provider: provider.businessName,
+            deletedStorage: {
+              purchaseOrders: uniq(keysPurchaseOrders),
+              invoices: uniq(keysInvoices)
+            }
+          }
+        }
+      });
+    });
+
+    // Best-effort delete from storage (no revierte BD si falla storage)
+    for (const key of uniq(keysPurchaseOrders)) {
+      try { await deleteFromSupabase('purchase-orders', key); } catch (e) {
+        console.warn('No se pudo borrar archivo de purchase-orders:', key, e.message || e);
+      }
+    }
+    for (const key of uniq(keysInvoices)) {
+      try { await deleteFromSupabase('invoices', key); } catch (e) {
+        console.warn('No se pudo borrar archivo de invoices:', key, e.message || e);
+      }
+    }
+
+    return res.json({ message: 'Orden eliminada correctamente' });
+  } catch (error) {
+    console.error('Error deletePurchaseOrder:', error);
+    return res.status(500).json({ error: 'Error al eliminar orden' });
+  }
+}
+
+
+export async function updatePurchaseOrder(req, res) {
+  try {
+    const id = Number(req.params.id);
+    const userId = req.user?.id;
+    const userEmail = req.user?.email;
+    const { monto, fecha, observaciones } = req.body;
+
+    const provider = await prisma.provider.findFirst({
+      where: { emailContacto: userEmail, isActive: true, deletedAt: null },
+      select: { id: true, businessName: true }
+    });
+    if (!provider) return res.status(404).json({ error: 'Proveedor no encontrado' });
+
+    const po = await prisma.purchaseOrder.findUnique({
+      where: { id },
+      include: { poInvoices: true }
+    });
+    if (!po) return res.status(404).json({ error: 'Orden no encontrada' });
+
+    if (po.providerId !== provider.id) {
+      return res.status(403).json({ error: 'No autorizado' });
+    }
+
+    if (po.status !== 'DRAFT') {
+      return res.status(400).json({ error: 'Solo se pueden editar órdenes en DRAFT' });
+    }
+
+    const orderFile = req.files?.archivoOrden?.[0] || null;
+    const invoicePdfFiles = req.files?.archivoFacturaPdf || [];
+    const invoiceXmlFiles = req.files?.archivoFacturaXml || [];
+
+    const wantsReplaceInvoices = invoicePdfFiles.length > 0 || invoiceXmlFiles.length > 0;
+
+    // si pretende reemplazar facturas, deben venir pareadas
+    if (wantsReplaceInvoices) {
+      if (invoicePdfFiles.length === 0) return res.status(400).json({ error: 'Debe subir al menos un PDF de factura' });
+      if (invoiceXmlFiles.length === 0) return res.status(400).json({ error: 'Debe subir al menos un XML de factura' });
+
+      if (invoicePdfFiles.length !== invoiceXmlFiles.length) {
+        return res.status(400).json({
+          error: 'La cantidad de facturas PDF debe ser igual a la cantidad de facturas XML',
+          pdfCount: invoicePdfFiles.length,
+          xmlCount: invoiceXmlFiles.length
+        });
+      }
+    }
+
+    const ts = Date.now();
+
+    // Subidas nuevas (para rollback si algo falla)
+    const uploadedKeys = []; // { bucket, key }
+    let newOrder = null; // { url, path }
+    const newInvoices = []; // { pdfUrl,pdfStorageKey, xmlUrl,xmlStorageKey }
+
+    // 1) Si viene nuevo PDF de orden, subirlo
+    if (orderFile) {
+      const orderFilename = `PO_${po.number}_${ts}.pdf`;
+      const orderPath = `${provider.id}/${orderFilename}`;
+
+      try {
+        const up = await uploadToSupabase('purchase-orders', orderPath, orderFile.buffer, 'application/pdf');
+        newOrder = { url: up.url, path: up.path };
+        uploadedKeys.push({ bucket: 'purchase-orders', key: up.path });
+      } catch (e) {
+        console.error('Error subiendo nueva Orden a Supabase:', e.message || e);
+        return res.status(502).json({ error: 'Error subiendo nuevo PDF de orden', detail: e.message || String(e) });
+      }
+    }
+
+    // 2) Si viene reemplazo de facturas, subir todas (PDF+XML) con rollback
+    if (wantsReplaceInvoices) {
+      try {
+        for (let i = 0; i < invoicePdfFiles.length; i++) {
+          const pdfF = invoicePdfFiles[i];
+          const xmlF = invoiceXmlFiles[i];
+          const idx = i + 1;
+
+          const pdfName = `FAC_${po.number}_${ts}_${idx}.pdf`;
+          const xmlName = `FAC_${po.number}_${ts}_${idx}.xml`;
+          const pdfPath = `${provider.id}/${pdfName}`;
+          const xmlPath = `${provider.id}/${xmlName}`;
+
+          const upPdf = await uploadToSupabase('invoices', pdfPath, pdfF.buffer, 'application/pdf');
+          uploadedKeys.push({ bucket: 'invoices', key: upPdf.path });
+
+          const upXml = await uploadToSupabase('invoices', xmlPath, xmlF.buffer, 'application/xml');
+          uploadedKeys.push({ bucket: 'invoices', key: upXml.path });
+
+          newInvoices.push({
+            pdfUrl: upPdf.url,
+            pdfStorageKey: upPdf.path,
+            xmlUrl: upXml.url,
+            xmlStorageKey: upXml.path
+          });
+        }
+      } catch (e) {
+        console.error('Error subiendo nuevas facturas a Supabase:', e.message || e);
+
+        // rollback de lo subido en este update
+        for (const k of uploadedKeys.reverse()) {
+          try { await deleteFromSupabase(k.bucket, k.key); } catch (er) {
+            console.warn('No se pudo eliminar en rollback (update):', k.bucket, k.key, er.message || er);
+          }
+        }
+
+        return res.status(502).json({ error: 'Error subiendo nuevas facturas', detail: e.message || String(e) });
+      }
+    }
+
+    // 3) Guardar cambios en BD
+    const oldOrderKey = po.storageKey;
+
+    // keys viejas de invoices para borrarlas después (si se reemplazan)
+    const oldInvoiceKeys = [];
+    if (po.invoiceStorageKey) oldInvoiceKeys.push(po.invoiceStorageKey);
+    if (po.invoiceXmlStorageKey) oldInvoiceKeys.push(po.invoiceXmlStorageKey);
+    for (const inv of (po.poInvoices || [])) {
+      if (inv.pdfStorageKey) oldInvoiceKeys.push(inv.pdfStorageKey);
+      if (inv.xmlStorageKey) oldInvoiceKeys.push(inv.xmlStorageKey);
+    }
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const data = {};
+      if (monto != null && String(monto).trim() !== '') data.total = String(monto);
+      if (fecha) data.issuedAt = new Date(fecha);
+      if (observaciones !== undefined) data.obervations = observaciones || null;
+
+      if (newOrder) {
+        data.pdfUrl = newOrder.url;
+        data.storageKey = newOrder.path;
+      }
+
+      // si reemplaza facturas: actualizar legacy + reemplazar hijas
+      if (wantsReplaceInvoices) {
+        const firstInv = newInvoices[0];
+        data.invoicePdfUrl = firstInv?.pdfUrl || null;
+        data.invoiceStorageKey = firstInv?.pdfStorageKey || null;
+        data.invoiceXmlUrl = firstInv?.xmlUrl || null;
+        data.invoiceXmlStorageKey = firstInv?.xmlStorageKey || null;
+        data.invoiceUploadedAt = new Date();
+
+        await tx.purchaseOrderInvoice.deleteMany({ where: { purchaseOrderId: id } });
+        await tx.purchaseOrderInvoice.createMany({
+          data: newInvoices.map((inv) => ({
+            purchaseOrderId: id,
+            pdfUrl: inv.pdfUrl,
+            pdfStorageKey: inv.pdfStorageKey,
+            xmlUrl: inv.xmlUrl,
+            xmlStorageKey: inv.xmlStorageKey
+          }))
+        });
+      }
+
+      const poUp = await tx.purchaseOrder.update({
+        where: { id },
+        data,
+        include: {
+          provider: { select: { businessName: true, rfc: true } },
+          poInvoices: true
+        }
+      });
+
+      await tx.auditLog.create({
+        data: {
+          actorId: userId,
+          action: 'UPDATE_PURCHASE_ORDER',
+          entity: 'PurchaseOrder',
+          entityId: id,
+          meta: {
+            number: po.number,
+            changed: {
+              fields: {
+                monto: monto != null ? String(monto) : undefined,
+                fecha: fecha || undefined,
+                observaciones: observaciones !== undefined ? (observaciones || null) : undefined
+              },
+              orderFileReplaced: Boolean(newOrder),
+              invoicesReplaced: Boolean(wantsReplaceInvoices),
+              newOrderKey: newOrder?.path || null,
+              newInvoicesCount: newInvoices.length || 0
+            }
+          }
+        }
+      });
+
+      return poUp;
+    });
+
+    // 4) Limpieza best-effort de archivos viejos (si hubo reemplazo)
+    if (newOrder && oldOrderKey) {
+      try { await deleteFromSupabase('purchase-orders', oldOrderKey); } catch (e) {
+        console.warn('No se pudo borrar orden anterior:', oldOrderKey, e.message || e);
+      }
+    }
+
+    if (wantsReplaceInvoices) {
+      const uniq = (arr) => [...new Set(arr.filter(Boolean))];
+      for (const key of uniq(oldInvoiceKeys)) {
+        try { await deleteFromSupabase('invoices', key); } catch (e) {
+          console.warn('No se pudo borrar factura anterior:', key, e.message || e);
+        }
+      }
+    }
+
+    return res.json({ message: 'Orden actualizada correctamente', data: updated });
+  } catch (error) {
+    console.error('Error updatePurchaseOrder:', error);
+    return res.status(500).json({ error: 'Error al actualizar la orden' });
   }
 }
