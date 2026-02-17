@@ -28,10 +28,14 @@ import authRoutes from './routes/auth.routes.js';
 const app = express();
 verifyMailer();
 
-const allowedOrigins = [
-  'http://localhost:5173', // Para que te funcione en local siempre
-  ...(process.env.FRONT_PUBLIC_URL || '').split(',').map(url => url.trim())
-].filter(Boolean);
+const allowedOrigins = (process.env.FRONT_PUBLIC_URLS || "http://localhost:5173")
+  .split(",")
+  .map((u) => u.trim())
+  .filter(Boolean);
+
+console.log("🔒 CORS allowed origins:", allowedOrigins);
+
+app.use(cors({ origin: allowedOrigins, credentials: true }));
 
 console.log('🔒 CORS allowed origins:', allowedOrigins); // <- AÑADE ESTO
 

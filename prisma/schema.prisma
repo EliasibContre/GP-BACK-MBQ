@@ -20,18 +20,14 @@ model User {
   phone                 String?
   createdAccessRequests AccessRequest[]      @relation("AccessRequestCreatedUsers")
   decidedAccessRequests AccessRequest[]      @relation("AccessRequestDecisions")
-
-  //nuevos campos
-  createdPayments       Payment[]            @relation("PaymentCreatedBy")
-  decidedPayments       Payment[]            @relation("PaymentDecidedBy") 
-
-  deletedProviders      Provider[]           @relation("DeletedProviders")
-
   auditLogs             AuditLog[]
   reviewedInvoices      Invoice[]            @relation("InvoiceReviewedBy")
   loginCodes            LoginCode[]
   notifications         Notification[]
   passwordResetTokens   PasswordResetToken[]
+  createdPayments       Payment[]            @relation("PaymentCreatedBy")
+  decidedPayments       Payment[]            @relation("PaymentDecidedBy")
+  deletedProviders      Provider[]           @relation("DeletedProviders")
   inactivatedProviders  Provider[]           @relation("InactivatedProviders")
   reviewedDocs          ProviderDocument[]   @relation("ReviewedByUser")
   uploadedDocs          ProviderDocument[]   @relation("UploadedByUser")
@@ -98,18 +94,17 @@ model Provider {
   isActive          Boolean               @default(true)
   observaciones     String?
   personType        PersonType?
+  deletedAt         DateTime?
+  deletedBy         Int?
   invoices          Invoice[]
+  deletedByUser     User?                 @relation("DeletedProviders", fields: [deletedBy], references: [id])
   inactivatedByUser User?                 @relation("InactivatedProviders", fields: [inactivatedBy], references: [id])
   bankAccounts      ProviderBankAccount[]
   contacts          ProviderContact[]
   documents         ProviderDocument[]
   purchaseOrders    PurchaseOrder[]
-  deletedAt         DateTime?
-  deletedBy         Int?
-  deletedByUser     User? @relation("DeletedProviders", fields: [deletedBy], references: [id])
 
   @@index([deletedAt])
-
   @@index([businessName])
   @@index([isActive])
 }
@@ -212,21 +207,21 @@ model SatImport {
 /// *
 /// * ===================== Órdenes de compra, Facturas y Pagos =====================
 model PurchaseOrder {
-  id                   Int                 @id @default(autoincrement())
-  number               String              @unique
+  id                   Int                    @id @default(autoincrement())
+  number               String                 @unique
   providerId           Int
-  status               PurchaseOrderStatus @default(DRAFT)
-  currency             String              @default("MXN")
-  subtotal             Decimal?            @db.Decimal(14, 2)
-  taxes                Decimal?            @db.Decimal(14, 2)
-  total                Decimal?            @db.Decimal(14, 2)
+  status               PurchaseOrderStatus    @default(DRAFT)
+  currency             String                 @default("MXN")
+  subtotal             Decimal?               @db.Decimal(14, 2)
+  taxes                Decimal?               @db.Decimal(14, 2)
+  total                Decimal?               @db.Decimal(14, 2)
   createdById          Int
   approvedById         Int?
   issuedAt             DateTime?
   approvedAt           DateTime?
   receivedAt           DateTime?
-  createdAt            DateTime            @default(now())
-  updatedAt            DateTime            @updatedAt
+  createdAt            DateTime               @default(now())
+  updatedAt            DateTime               @updatedAt
   invoicePdfUrl        String?
   invoiceStorageKey    String?
   invoiceUploadedAt    DateTime?
@@ -237,31 +232,27 @@ model PurchaseOrder {
   storageKey           String?
   invoices             Invoice[]
   payments             Payment[]
-  approvedBy           User?               @relation("POApprovedBy", fields: [approvedById], references: [id])
-  createdBy            User                @relation("POCreatedBy", fields: [createdById], references: [id])
-  provider             Provider            @relation(fields: [providerId], references: [id])
+  approvedBy           User?                  @relation("POApprovedBy", fields: [approvedById], references: [id])
+  createdBy            User                   @relation("POCreatedBy", fields: [createdById], references: [id])
+  provider             Provider               @relation(fields: [providerId], references: [id])
+  poInvoices           PurchaseOrderInvoice[]
   items                PurchaseOrderItem[]
-   poInvoices          PurchaseOrderInvoice[]
 
   @@index([providerId, status])
 }
 
 model PurchaseOrderInvoice {
-  id              Int      @id @default(autoincrement())
+  id              Int           @id @default(autoincrement())
   purchaseOrderId Int
-
   pdfUrl          String?
   pdfStorageKey   String?
   xmlUrl          String?
   xmlStorageKey   String?
-
-  uploadedAt      DateTime @default(now())
-
+  uploadedAt      DateTime      @default(now())
   purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
 
   @@index([purchaseOrderId])
 }
-
 
 model PurchaseOrderItem {
   id              Int           @id @default(autoincrement())
@@ -301,33 +292,22 @@ model Payment {
   paidAt          DateTime
   method          PaymentMethod @default(TRANSFER)
   reference       String?
-
-  status          PaymentStatus @default(PENDING)
-
-  installmentNo   Int?  //1,2,3
-  installmentOf   Int? //3
-
-  createdById     Int?
-  createdBy       User?         @relation("PaymentCreatedBy", fields: [createdById], references: [id])
-
-  decidedById     Int?
-  decidedBy       User?         @relation("PaymentDecidedBy", fields: [decidedById], references: [id])
-  decidedAt       DateTime?
-  decisionComment String?
-
   createdAt       DateTime      @default(now())
   purchaseOrderId Int
+  createdById     Int?
+  decidedAt       DateTime?
+  decidedById     Int?
+  decisionComment String?
+  installmentNo   Int?
+  installmentOf   Int?
+  status          PaymentStatus @default(PENDING)
+  createdBy       User?         @relation("PaymentCreatedBy", fields: [createdById], references: [id])
+  decidedBy       User?         @relation("PaymentDecidedBy", fields: [decidedById], references: [id])
   purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
 
   @@index([purchaseOrderId])
   @@index([status])
   @@index([paidAt])
-}
-
-enum PaymentStatus{
-  PENDING
-  APPROVED
-  REJECTED
 }
 
 /// *
@@ -381,6 +361,12 @@ model AccessRequest {
 
   @@index([email, status])
   @@index([status])
+}
+
+enum PaymentStatus {
+  PENDING
+  APPROVED
+  REJECTED
 }
 
 /// *
