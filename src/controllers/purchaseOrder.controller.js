@@ -642,7 +642,7 @@ export async function updatePurchaseOrder(req, res) {
     const id = Number(req.params.id);
     const userId = req.user?.id;
     const userEmail = req.user?.email;
-    const { monto, fecha, observaciones } = req.body;
+    const { monto, fecha, observaciones } = req.body || {};
 
     const provider = await prisma.provider.findFirst({
       where: { emailContacto: userEmail, isActive: true, deletedAt: null },
