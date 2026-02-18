@@ -4,6 +4,29 @@ import { sendPurchaseOrderApprovedEmail, sendPurchaseOrderRejectedEmail } from '
 import { uploadToSupabase, deleteFromSupabase } from '../config/supabase.js';
 import path from 'path';
 
+
+function toLocalNoon(dateStr) {
+  // dateStr esperado: "YYYY-MM-DD"
+  if (!dateStr) return null;
+
+  const s = String(dateStr).trim();
+
+  // Si ya viene con hora/ISO (ej "2026-02-19T00:00:00-06:00"), respétalo
+  if (s.includes("T")) {
+    const d = new Date(s);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+
+  const parts = s.split("-");
+  if (parts.length !== 3) return null;
+
+  const [y, m, d] = parts.map(Number);
+  if (!y || !m || !d) return null;
+
+  // Mediodía local para evitar que por TZ se vaya al día anterior
+  return new Date(y, m - 1, d, 12, 0, 0);
+}
+
 // Crear orden de compra (proveedor) - MULTI FACTURAS
 export async function createPurchaseOrder(req, res) {
   try {
@@ -11,6 +34,11 @@ export async function createPurchaseOrder(req, res) {
     const userEmail = req.user.email;
     const { monto, fecha, numeroOrden, rfc, observaciones } = req.body;
 
+    // ✅ Validar y normalizar fecha (antes de subir archivos)
+    const issuedAt = toLocalNoon(fecha);
+    if (!issuedAt) {
+      return res.status(400).json({ error: "Fecha inválida (usa YYYY-MM-DD)" });
+    }
     const provider = await prisma.provider.findFirst({
       where: { emailContacto: userEmail, rfc, isActive: true }
     });
@@ -119,7 +147,7 @@ export async function createPurchaseOrder(req, res) {
           providerId: provider.id,
           status: 'DRAFT',
           total: String(monto),
-          issuedAt: new Date(fecha),
+          issuedAt,
           obervations: observaciones || null,
 
           pdfUrl,
@@ -644,6 +672,14 @@ export async function updatePurchaseOrder(req, res) {
     const userEmail = req.user?.email;
     const { monto, fecha, observaciones } = req.body || {};
 
+  let issuedAt = null;
+    if (fecha) {
+      issuedAt = toLocalNoon(fecha);
+      if (!issuedAt) {
+        return res.status(400).json({ error: "Fecha inválida (usa YYYY-MM-DD)" });
+      }
+    }
+
     const provider = await prisma.provider.findFirst({
       where: { emailContacto: userEmail, isActive: true, deletedAt: null },
       select: { id: true, businessName: true }
@@ -761,9 +797,9 @@ export async function updatePurchaseOrder(req, res) {
     const updated = await prisma.$transaction(async (tx) => {
       const data = {};
       if (monto != null && String(monto).trim() !== '') data.total = String(monto);
-      if (fecha) data.issuedAt = new Date(fecha);
+      // ✅ usar la fecha ya validada (si venía)
+      if (issuedAt) data.issuedAt = issuedAt;
       if (observaciones !== undefined) data.obervations = observaciones || null;
-
       if (newOrder) {
         data.pdfUrl = newOrder.url;
         data.storageKey = newOrder.path;
