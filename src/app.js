@@ -32,13 +32,7 @@ const allowedOrigins = (process.env.FRONT_PUBLIC_URLS || "http://localhost:5173"
   .split(",")
   .map((u) => u.trim())
   .filter(Boolean);
-
-console.log("🔒 CORS allowed origins:", allowedOrigins);
-
-app.use(cors({ origin: allowedOrigins, credentials: true }));
-
 console.log('🔒 CORS allowed origins:', allowedOrigins); // <- AÑADE ESTO
-
 
 // Para que el frontend pueda enviar/recibir cookie HttpOnly (ajusta origin en prod)
 app.use(cors({ origin: allowedOrigins, credentials: true }));
