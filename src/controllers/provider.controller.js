@@ -800,21 +800,37 @@ export async function updateMyProviderData(req, res, next) {
 
 export async function getAdminProvidersTable(req, res, next) {
   try {
-    const q = String(req.query.q || '').trim();
+    const q = String(req.query.q || "").trim();
 
-    const providers = await prisma.provider.findMany({
-      where: {
-        isActive: true,
-        ...(q
-          ? {
+    // ✅ NUEVO: status opcional para filtrar activos/inactivos/todos
+    // default: "active" para NO romper nada
+    const status = String(req.query.status || "active").trim().toLowerCase();
+
+    // Arma where sin romper lo que ya tienes
+    const where = {
+      ...(q
+        ? {
             OR: [
-              { businessName: { contains: q, mode: 'insensitive' } },
-              { rfc: { contains: q, mode: 'insensitive' } },
+              { businessName: { contains: q, mode: "insensitive" } },
+              { rfc: { contains: q, mode: "insensitive" } },
             ],
           }
-          : {}),
-      },
-      orderBy: { createdAt: 'desc' },
+        : {}),
+    };
+
+    // ✅ Mantener comportamiento actual: si no mandan status, solo activos
+    if (status === "active") where.isActive = true;
+    else if (status === "inactive") where.isActive = false;
+    else if (status === "all") {
+      // no filtra por isActive
+    } else {
+      // status inválido => fallback a comportamiento actual
+      where.isActive = true;
+    }
+
+    const providers = await prisma.provider.findMany({
+      where,
+      orderBy: { createdAt: "desc" },
       take: 50,
       select: {
         id: true,
@@ -825,9 +841,13 @@ export async function getAdminProvidersTable(req, res, next) {
         personType: true,
         observaciones: true,
 
+        // ✅ opcionales (no rompen front; útiles para Reactivación)
+        inactivatedAt: true,
+        inactiveReason: true,
+
         // ✅ Facturas (Invoice)
         invoices: {
-          orderBy: { createdAt: 'desc' },
+          orderBy: { createdAt: "desc" },
           take: 5,
           select: {
             id: true,
@@ -839,7 +859,7 @@ export async function getAdminProvidersTable(req, res, next) {
 
         // ✅ Órdenes de compra (PurchaseOrder)
         purchaseOrders: {
-          orderBy: { createdAt: 'desc' },
+          orderBy: { createdAt: "desc" },
           take: 5,
           select: {
             id: true,
@@ -851,7 +871,7 @@ export async function getAdminProvidersTable(req, res, next) {
 
         // ✅ Documentos de respaldo (ProviderDocument + DocumentType)
         documents: {
-          orderBy: { createdAt: 'desc' },
+          orderBy: { createdAt: "desc" },
           take: 5,
           select: {
             id: true,
@@ -865,10 +885,10 @@ export async function getAdminProvidersTable(req, res, next) {
 
     // 🔁 Mapeo EXACTO a lo que tu tabla espera (para no romper el front)
     const rows = providers.map((p) => {
-      const estatus = !p.isActive ? 'Inactivo' : !p.isApproved ? 'En revisión' : 'Activo';
+      const estatus = !p.isActive ? "Inactivo" : !p.isApproved ? "En revisión" : "Activo";
 
       // “categoria” no existe en BD: usamos personType como etiqueta (puedes cambiarlo luego)
-      const categoria = p.personType ? (p.personType === 'MORAL' ? 'Moral' : 'Física') : 'Sin categoría';
+      const categoria = p.personType ? (p.personType === "MORAL" ? "Moral" : "Física") : "Sin categoría";
 
       return {
         id: p.id,
@@ -877,13 +897,16 @@ export async function getAdminProvidersTable(req, res, next) {
         estatus,
         comentarios: p.observaciones ? [p.observaciones] : [],
 
+        // (Opcional extra para Reactivación; si tu tabla los ignora, no pasa nada)
+        inactivatedAt: p.inactivatedAt || null,
+        inactiveReason: p.inactiveReason || null,
+
         // DocumentList espera {id, nombre, tamaño}
-        // (por ahora tamaño “-”; luego lo sacas del storage si quieres)
         facturas: p.invoices.map((i) => ({
           id: i.id,
           nombre: `factura_${i.number || i.id}.pdf`,
           tamaño: "-",
-          url: i.pdfUrl || null, // ✅ extra (no rompe)
+          url: i.pdfUrl || null,
         })),
 
         ordenesCompra: p.purchaseOrders.map((o) => ({
@@ -895,7 +918,7 @@ export async function getAdminProvidersTable(req, res, next) {
 
         documentosRespaldo: p.documents.map((d) => ({
           id: d.id,
-          nombre: `${d.documentType?.name || 'documento'}.pdf`,
+          nombre: `${d.documentType?.name || "documento"}.pdf`,
           tamaño: "-",
           url: d.fileUrl || null,
         })),
@@ -904,7 +927,7 @@ export async function getAdminProvidersTable(req, res, next) {
 
     return res.json({ results: rows });
   } catch (err) {
-    console.error('Error en getAdminProvidersTable:', err);
+    console.error("Error en getAdminProvidersTable:", err);
     next(err);
   }
 }

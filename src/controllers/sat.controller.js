@@ -2,7 +2,7 @@
 import crypto from "crypto";
 import XLSX from "xlsx";
 import { prisma } from "../config/prisma.js";
-import { supabase } from "../config/supabase.js";
+import { uploadToSupabase } from "../config/supabase.js";
 
 const DEFAULT_BUCKET = process.env.SAT_BLACKLIST_BUCKET || "sat-lists";
 
@@ -75,7 +75,9 @@ function pickDateFromText(text) {
  * PRESUNTO | DESVIRTUADO | DEFINITIVO | SENTENCIA_FAVORABLE
  */
 function detectSituacion(raw) {
-    const v = String(raw || "").trim().toUpperCase();
+    const v = String(raw || "")
+        .trim()
+        .toUpperCase();
     if (v.includes("DEFINIT")) return "DEFINITIVO";
     if (v.includes("DESVIR")) return "DESVIRTUADO";
     if (v.includes("SENTEN")) return "SENTENCIA_FAVORABLE";
@@ -128,19 +130,18 @@ function buildHeaderIndex(rows) {
 }
 
 /**
- * Upload opcional a Supabase Storage.
- * Si falla storage, puedes comentar esta parte y el import seguirá funcionando.
+ * ✅ Path fijo "latest" (SIN acumulaciones)
+ * Guarda siempre el último archivo importado. Sobrescribe por extensión.
+ * Ej:
+ *  imports/sat-blacklist/latest.xlsx
+ *  imports/sat-blacklist/latest.csv
  */
-async function uploadToStorage({ bucket, path, buffer, mimetype }) {
-    if (!supabase) throw new Error("Supabase no está configurado (SUPABASE_URL/SUPABASE_SERVICE_KEY).");
-
-    const up = await supabase.storage.from(bucket).upload(path, buffer, {
-        upsert: false,
-        contentType: mimetype || "application/octet-stream",
-    });
-
-    if (up.error) throw new Error(up.error.message);
-    return { bucket, path };
+function latestSatKey(originalname) {
+    const m = String(originalname || "")
+        .toLowerCase()
+        .match(/\.(csv|xlsx|xls)$/);
+    const ext = m?.[1] || "xlsx";
+    return `imports/sat-blacklist/latest.${ext}`;
 }
 
 export async function importSatBlacklist(req, res) {
@@ -148,13 +149,13 @@ export async function importSatBlacklist(req, res) {
         if (!req.file) return res.status(400).json({ message: "Falta archivo (field: file)" });
         if (!req.user?.id) return res.status(401).json({ message: "No autenticado" });
 
-        const { originalname, size, buffer, mimetype } = req.file;
+        const { originalname, buffer, mimetype } = req.file;
 
         // 0) Validar extensión
         const extOk = /\.(csv|xlsx|xls)$/i.test(originalname);
         if (!extOk) return res.status(400).json({ message: "Formato inválido. Usa CSV/XLSX/XLS." });
 
-        // 1) Hash para dedupe
+        // 1) Hash para dedupe (evita reprocesar si es idéntico al último import)
         const fileHash = crypto.createHash("sha256").update(buffer).digest("hex");
 
         const last = await prisma.satImport.findFirst({ orderBy: { createdAt: "desc" } });
@@ -166,20 +167,23 @@ export async function importSatBlacklist(req, res) {
             });
         }
 
-        // 2) (Opcional) subir a storage
-        // Si esto te da lata, puedes comentar esta sección completa.
+        // 2) (Opcional) subir a storage SIN acumulaciones (latest + upsert=true)
+        // Si storage falla, NO tumbo el import: solo aviso.
         try {
             const bucket = DEFAULT_BUCKET;
-            const safeName = originalname.replace(/[^a-zA-Z0-9._-]+/g, "_");
-            const storagePath = `imports/sat-blacklist/${Date.now()}_${safeName}`;
-            await uploadToStorage({ bucket, path: storagePath, buffer, mimetype });
-            // Nota: tu SatImport actual NO guarda bucket/path (tu schema no tiene esos campos)
+            const storagePath = latestSatKey(originalname);
+
+            await uploadToSupabase(bucket, storagePath, buffer, {
+                contentType: mimetype || "application/octet-stream",
+                upsert: true, // ✅ reemplaza, no acumula
+            });
+
+            console.log("[SAT IMPORT] Stored latest file:", { bucket, storagePath });
         } catch (e) {
-            // Si storage falla, NO tumbo el import: solo aviso
-            console.warn("[SAT IMPORT] Storage upload failed:", e?.message);
+            console.warn("[SAT IMPORT] Storage upload failed:", e?.message || e);
         }
 
-        // ✅ 3) Crear registro SatImport ANTES de usarlo (evita "importRow before initialization")
+        // 3) Crear registro SatImport ANTES de usarlo (evita "importRow before initialization")
         const importRow = await prisma.satImport.create({
             data: {
                 filename: originalname,
@@ -217,10 +221,17 @@ export async function importSatBlacklist(req, res) {
             "situacion fiscal",
         ]);
 
-        // Estos son opcionales (si existen, se mapean; si no, quedan null)
-        const colPresSat = resolveColumn(idx, ["presuncion oficio sat", "presuncion oficio", "numero y fecha de oficio global de presuncion sat"]);
+        // Opcionales
+        const colPresSat = resolveColumn(idx, [
+            "presuncion oficio sat",
+            "presuncion oficio",
+            "numero y fecha de oficio global de presuncion sat",
+        ]);
         const colPresSatDate = resolveColumn(idx, ["presuncion sat fecha", "fecha presuncion sat"]);
-        const colPresDof = resolveColumn(idx, ["presuncion oficio dof", "numero y fecha de oficio global de presuncion dof"]);
+        const colPresDof = resolveColumn(idx, [
+            "presuncion oficio dof",
+            "numero y fecha de oficio global de presuncion dof",
+        ]);
         const colPresDofDate = resolveColumn(idx, ["presuncion dof fecha", "fecha presuncion dof"]);
 
         const colDesvSat = resolveColumn(idx, ["desvirtuado oficio sat", "desvirtuado sat oficio"]);
@@ -283,8 +294,6 @@ export async function importSatBlacklist(req, res) {
 
                 sentenciaOficioDof: String(getCell(r, idx, colSenDof)).trim() || null,
                 sentenciaDofDate: pickDateFromText(getCell(r, idx, colSenDofDate)),
-
-                // loadedAt lo pone Prisma por default
             });
         }
 
@@ -296,7 +305,7 @@ export async function importSatBlacklist(req, res) {
         await prisma.satBlacklist.deleteMany();
 
         // createMany por chunks
-        const chunkSize = 1500; // 1500 suele ser más estable que 2000 en algunas DBs
+        const chunkSize = 1500;
         let inserted = 0;
 
         for (let i = 0; i < payload.length; i += chunkSize) {
@@ -323,7 +332,10 @@ export async function importSatBlacklist(req, res) {
         });
     } catch (err) {
         console.error(err);
-        return res.status(500).json({ message: "Error importando blacklist SAT", detail: err?.message });
+        return res.status(500).json({
+            message: "Error importando blacklist SAT",
+            detail: err?.message,
+        });
     }
 }
 

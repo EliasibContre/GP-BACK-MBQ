@@ -23,79 +23,84 @@ function cleanEnv(value) {
 const supabaseUrl = cleanEnv(process.env.SUPABASE_URL);
 const supabaseServiceKey = cleanEnv(process.env.SUPABASE_SERVICE_KEY);
 
-if (!supabaseUrl) {
-  throw new Error("❌ Faltan SUPABASE_URL en .env");
+if (!supabaseUrl)throw new Error("❌ Faltan SUPABASE_URL en .env");
+
+if (!supabaseServiceKey)throw new Error("❌ Faltan SUPABASE_SERVICE_KEY en .env");
+
+// Debug útil (solo dev)
+if (process.env.NODE_ENV !== "production") {
+  // Validación: JWT debe tener 3 partes
+  const jwtParts = supabaseServiceKey.split(".");
+  console.log("✅ Supabase URL:", supabaseUrl);
+  console.log("✅ Service Key length:", supabaseServiceKey.length);
+  console.log("✅ JWT parts:", jwtParts.length);
+} else {
+  // Validación silenciosa en prod (sin log)
+  const jwtParts = supabaseServiceKey.split(".");
+  if (jwtParts.length !== 3) {
+    throw new Error("❌ SUPABASE_SERVICE_KEY inválida: no parece JWT (3 partes separadas por '.')");
+  }
 }
-
-if (!supabaseServiceKey) {
-  throw new Error("❌ Faltan SUPABASE_SERVICE_KEY en .env");
-}
-
-// Validación: JWT debe tener 3 partes
-const jwtParts = supabaseServiceKey.split(".");
-if (jwtParts.length !== 3) {
-  throw new Error(
-    "❌ SUPABASE_SERVICE_KEY inválida: no parece JWT (debe tener 3 partes separadas por '.')"
-  );
-}
-
-// Debug útil (déjalo mientras pruebas, luego lo comentas)
-console.log("✅ Supabase URL:", supabaseUrl);
-console.log("✅ Service Key length:", supabaseServiceKey.length);
-console.log("✅ JWT parts:", jwtParts.length);
-
 // Cliente Supabase (SOLO BACKEND)
 export const supabase = createClient(supabaseUrl, supabaseServiceKey, {
-  auth: {
-    autoRefreshToken: false,
-    persistSession: false,
-  },
+  auth: {autoRefreshToken: false,persistSession: false,},
 });
-
 /**
- * Subir archivo a Supabase Storage
+ * Subir archivo a Supabase Storage (ROBUSTO)
+ * - upsert true evita duplicaciones al reemplazar
  * @param {string} bucket
- * @param {string} path
+ * @param {string} path (storageKey)
  * @param {Buffer|Uint8Array} fileBuffer
- * @param {string} contentType
+ * @param {object} options
  */
-export async function uploadToSupabase(
-  bucket,
-  path,
-  fileBuffer,
-  contentType = "application/pdf"
-) {
+export async function uploadToSupabase(bucket, path, fileBuffer, options = {}) {
+  const {
+    contentType = "application/octet-stream",
+    upsert = true,
+    cacheControl = "3600",
+  } = options;
+
   if (!bucket || !path) {
     throw new Error("Bucket y path son requeridos para uploadToSupabase()");
+  }
+  if (!fileBuffer) {
+    throw new Error("fileBuffer es requerido para uploadToSupabase()");
   }
 
   const { data, error } = await supabase.storage.from(bucket).upload(path, fileBuffer, {
     contentType,
-    upsert: false,
+    upsert,
+    cacheControl,
   });
 
   if (error) {
     throw new Error(`Error al subir archivo: ${error.message}`);
   }
 
+  const realPath = data?.path || path;
+
   return {
-    path: data.path,
-    fullPath: `${bucket}/${data.path}`,
+    path: realPath,
+    fullPath: `${bucket}/${realPath}`,
   };
 }
 
 /**
- * Eliminar archivo de Supabase Storage
+ * Eliminar archivo(s) de Supabase Storage
+ * - acepta string o array
  */
-export async function deleteFromSupabase(bucket, path) {
-  if (!bucket || !path) return;
+export async function deleteFromSupabase(bucket, pathOrPaths) {
+  if (!bucket || !pathOrPaths) return;
 
-  const { error } = await supabase.storage.from(bucket).remove([path]);
+  const paths = Array.isArray(pathOrPaths) ? pathOrPaths : [pathOrPaths];
+  const clean = [...new Set(paths.filter(Boolean))];
+  if (clean.length === 0) return;
+
+  const { error } = await supabase.storage.from(bucket).remove(clean);
   if (error) {
     throw new Error(`Error al eliminar archivo: ${error.message}`);
   }
 }
-
 /**
  * Obtener URL pública (solo si el bucket es público)
  */
