@@ -1,12 +1,26 @@
-import { listNotifications, markNotificationRead, markAllRead } from '../services/notification.service.js';
-import { asyncHandler } from '../utils/asyncHandler.js';
+// src/controllers/notifications.controller.js
+import {
+  listNotifications,
+  markNotificationRead,
+  markAllRead,
+  deleteUserRequestNotification,
+} from "../services/notification.service.js";
+import { asyncHandler } from "../utils/asyncHandler.js";
 
 export const getMyNotifications = asyncHandler(async (req, res) => {
-  console.log('📬 GET /api/notifications - Usuario:', req.user?.id, req.user?.email);
-  const unreadOnly = req.query.unread === '1' || req.query.unread === 'true';
-  console.log('📬 Filtro unreadOnly:', unreadOnly);
+  console.log("📬 GET /api/notifications - Usuario:", req.user?.id, req.user?.email);
+
+  const unreadOnly = req.query.unread === "1" || req.query.unread === "true";
+  console.log("📬 Filtro unreadOnly:", unreadOnly);
+
   const items = await listNotifications(req.user.id, { unreadOnly });
-  console.log('📬 Notificaciones encontradas:', items.length, items.map(i => ({ id: i.id, type: i.type, title: i.title })));
+
+  console.log(
+    "📬 Notificaciones encontradas:",
+    items.length,
+    items.map((i) => ({ id: i.id, type: i.type, title: i.title }))
+  );
+
   res.json(items);
 });
 
@@ -18,5 +32,15 @@ export const readNotification = asyncHandler(async (req, res) => {
 
 export const readAllNotifications = asyncHandler(async (req, res) => {
   const result = await markAllRead(req.user.id);
+  res.json(result);
+});
+
+/**
+ * ✅ NUEVO: borrar SOLO notificaciones de solicitudes de usuario
+ * Ruta sugerida: DELETE /api/notifications/:id/user-request
+ */
+export const deleteUserRequestNotif = asyncHandler(async (req, res) => {
+  const id = Number(req.params.id);
+  const result = await deleteUserRequestNotification(req.user.id, id);
   res.json(result);
 });
