@@ -287,52 +287,48 @@ model Invoice {
 }
 
 model Payment {
-  id              Int           @id @default(autoincrement())
-  amount          Decimal       @db.Decimal(14, 2)
+  id              Int               @id @default(autoincrement())
+  amount          Decimal           @db.Decimal(14, 2)
   paidAt          DateTime
-  method          PaymentMethod @default(TRANSFER)
+  method          PaymentMethod     @default(TRANSFER)
   reference       String?
-  createdAt       DateTime      @default(now())
+  createdAt       DateTime          @default(now())
   purchaseOrderId Int
   createdById     Int?
   decidedAt       DateTime?
   decidedById     Int?
   decisionComment String?
-  //Nuevo
-  evidences       PaymentEvidence[]
   installmentNo   Int?
   installmentOf   Int?
-  isScheduled Boolean @default(false)
-  status          PaymentStatus @default(PENDING)
-  createdBy       User?         @relation("PaymentCreatedBy", fields: [createdById], references: [id])
-  decidedBy       User?         @relation("PaymentDecidedBy", fields: [decidedById], references: [id])
-  purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  status          PaymentStatus     @default(PENDING)
+  isScheduled     Boolean           @default(false)
+  createdBy       User?             @relation("PaymentCreatedBy", fields: [createdById], references: [id])
+  decidedBy       User?             @relation("PaymentDecidedBy", fields: [decidedById], references: [id])
+  purchaseOrder   PurchaseOrder     @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  evidences       PaymentEvidence[]
 
   @@index([purchaseOrderId])
   @@index([status])
   @@index([paidAt])
 }
 
-
 model PaymentEvidence {
-  id          String   @id @default(cuid())
+  id           String       @id @default(cuid())
   paymentId    Int
-  uploadedById Int?     // si tu User.id también es Int
-  kind        EvidenceKind
-  bucket      String
-  path        String
-  fileName    String
-  mimeType    String?
-  sizeBytes   Int?
-  sha256      String?    // opcional: integridad
-  version     Int        @default(1)
-  isActive    Boolean    @default(true)
-  comment     String?
-
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-
-  payment     Payment  @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  uploadedById Int?
+  kind         EvidenceKind
+  bucket       String
+  path         String
+  fileName     String
+  mimeType     String?
+  sizeBytes    Int?
+  sha256       String?
+  version      Int          @default(1)
+  isActive     Boolean      @default(true)
+  comment      String?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+  payment      Payment      @relation(fields: [paymentId], references: [id], onDelete: Cascade)
 
   @@index([paymentId])
   @@index([paymentId, kind])
