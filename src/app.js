@@ -17,6 +17,7 @@ import notificationRoutes from './routes/notification.routes.js';
 import analyticsRoutes from './routes/analytics.routes.js';
 import paymentRoutes from './routes/payment.routes.js';
 import satRoutes from "./routes/sat.routes.js";
+import paymentEvidenceRoutes from "./routes/paymentEvidence.routes.js";
 
 // Carga variables de entorno
 import './config/env.js';
@@ -60,6 +61,7 @@ app.use("/api/sat", satRoutes);
 // Servir archivos estáticos de uploads
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 app.use('/api/digital-files', digitalFilesRoutes);
+app.use("/api/payment-evidence", paymentEvidenceRoutes);
 
 // Manejo de errores simple
 app.use((err, req, res, next) => {

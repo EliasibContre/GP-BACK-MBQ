@@ -298,8 +298,11 @@ model Payment {
   decidedAt       DateTime?
   decidedById     Int?
   decisionComment String?
+  //Nuevo
+  evidences       PaymentEvidence[]
   installmentNo   Int?
   installmentOf   Int?
+  isScheduled Boolean @default(false)
   status          PaymentStatus @default(PENDING)
   createdBy       User?         @relation("PaymentCreatedBy", fields: [createdById], references: [id])
   decidedBy       User?         @relation("PaymentDecidedBy", fields: [decidedById], references: [id])
@@ -308,6 +311,31 @@ model Payment {
   @@index([purchaseOrderId])
   @@index([status])
   @@index([paidAt])
+}
+
+
+model PaymentEvidence {
+  id          String   @id @default(cuid())
+  paymentId    Int
+  uploadedById Int?     // si tu User.id también es Int
+  kind        EvidenceKind
+  bucket      String
+  path        String
+  fileName    String
+  mimeType    String?
+  sizeBytes   Int?
+  sha256      String?    // opcional: integridad
+  version     Int        @default(1)
+  isActive    Boolean    @default(true)
+  comment     String?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  payment     Payment  @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  @@index([paymentId])
+  @@index([paymentId, kind])
 }
 
 /// *
@@ -367,6 +395,13 @@ enum PaymentStatus {
   PENDING
   APPROVED
   REJECTED
+  PAID
+}
+
+enum EvidenceKind {
+  PDF
+  XML
+  OTHER
 }
 
 /// *
