@@ -298,6 +298,8 @@ model Payment {
   decidedAt       DateTime?
   decidedById     Int?
   decisionComment String?
+  rejectionType   String?
+  invoiceErrorsJson Json?
   installmentNo   Int?
   installmentOf   Int?
   status          PaymentStatus     @default(PENDING)
@@ -389,6 +391,7 @@ model AccessRequest {
 
 enum PaymentStatus {
   PENDING
+  SUBMITTED
   APPROVED
   REJECTED
   PAID

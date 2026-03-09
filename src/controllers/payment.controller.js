@@ -410,11 +410,32 @@ export async function getPayment(req, res) {
     const { id } = req.params;
 
     const payment = await prisma.payment.findUnique({
-      where: { id: parseInt(id) },
+      where: { id: parseInt(id, 10) },
       include: {
         evidences: {
           where: { isActive: true },
-          select: { id: true, kind: true, fileName: true, createdAt: true }
+          select: {
+            id: true,
+            kind: true,
+            fileName: true,
+            createdAt: true,
+            isActive: true,
+            comment: true,
+          },
+        },
+        decidedBy: {
+          select: {
+            id: true,
+            fullName: true,
+            email: true,
+          },
+        },
+        createdBy: {
+          select: {
+            id: true,
+            fullName: true,
+            email: true,
+          },
         },
         purchaseOrder: {
           select: {
@@ -428,56 +449,55 @@ export async function getPayment(req, res) {
               select: {
                 id: true,
                 businessName: true,
-                rfc: true
-              }
-            }
-          }
-        }
-      }
+                rfc: true,
+              },
+            },
+          },
+        },
+      },
     });
 
     if (!payment) {
-      return res.status(404).json({ error: 'Pago no encontrado' });
+      return res.status(404).json({ error: "Pago no encontrado" });
     }
 
     res.json(payment);
   } catch (error) {
-    console.error('Error getPayment:', error);
-    res.status(500).json({ error: 'Error al obtener pago', detail: error.message });
+    console.error("Error getPayment:", error);
+    res.status(500).json({
+      error: "Error al obtener pago",
+      detail: error.message,
+    });
   }
 }
 
 /**
- * Listar pagos para aprobación (pendientes / aprobados / rechazados)
- * GET /api/payments/approval?status=PENDING&search=...&method=TRANSFER
+ * Listar pagos para aprobación
+ * GET /api/payments/approval?status=SUBMITTED&search=...&method=TRANSFER
  * Acceso: ADMIN, APPROVER
  */
 export async function listPaymentsForApproval(req, res) {
   try {
     const {
-      status = 'PENDING', // PENDING | APPROVED | REJECTED
-      search = '',
-      method,            // TRANSFER | CASH | CARD | OTHER
+      status = "SUBMITTED", // SUBMITTED | APPROVED | REJECTED | PAID | PENDING
+      search = "",
+      method,
       limit = 100,
-      offset = 0
+      offset = 0,
     } = req.query;
 
     const where = {};
 
-    // status
     if (status) where.status = status;
-
-    // method (si viene)
     if (method) where.method = method;
 
-    // search (OC number, proveedor, referencia, aprobador)
     if (search && String(search).trim()) {
       const q = String(search).trim();
       where.OR = [
-        { reference: { contains: q, mode: 'insensitive' } },
-        { purchaseOrder: { number: { contains: q, mode: 'insensitive' } } },
-        { purchaseOrder: { provider: { businessName: { contains: q, mode: 'insensitive' } } } },
-        { decidedBy: { fullName: { contains: q, mode: 'insensitive' } } },
+        { reference: { contains: q, mode: "insensitive" } },
+        { purchaseOrder: { number: { contains: q, mode: "insensitive" } } },
+        { purchaseOrder: { provider: { businessName: { contains: q, mode: "insensitive" } } } },
+        { decidedBy: { fullName: { contains: q, mode: "insensitive" } } },
       ];
     }
 
@@ -487,7 +507,7 @@ export async function listPaymentsForApproval(req, res) {
         include: {
           evidences: {
             where: { isActive: true },
-            select: { id: true, kind: true, fileName: true, createdAt: true }
+            select: { id: true, kind: true, fileName: true, createdAt: true, isActive: true },
           },
           decidedBy: { select: { id: true, fullName: true, email: true } },
           createdBy: { select: { id: true, fullName: true, email: true } },
@@ -497,29 +517,32 @@ export async function listPaymentsForApproval(req, res) {
               number: true,
               total: true,
               status: true,
-              provider: { select: { id: true, businessName: true, rfc: true } }
-            }
-          }
+              provider: { select: { id: true, businessName: true, rfc: true } },
+            },
+          },
         },
-        orderBy: [{ createdAt: 'desc' }],
-        take: parseInt(limit),
-        skip: parseInt(offset)
+        orderBy: [{ createdAt: "desc" }],
+        take: parseInt(limit, 10),
+        skip: parseInt(offset, 10),
       }),
-      prisma.payment.count({ where })
+      prisma.payment.count({ where }),
     ]);
 
     res.json({
       payments,
       pagination: {
         total,
-        limit: parseInt(limit),
-        offset: parseInt(offset),
-        hasMore: parseInt(offset) + parseInt(limit) < total
-      }
+        limit: parseInt(limit, 10),
+        offset: parseInt(offset, 10),
+        hasMore: parseInt(offset, 10) + parseInt(limit, 10) < total,
+      },
     });
   } catch (error) {
-    console.error('Error listPaymentsForApproval:', error);
-    res.status(500).json({ error: 'Error al listar pagos para aprobación', detail: error.message });
+    console.error("Error listPaymentsForApproval:", error);
+    res.status(500).json({
+      error: "Error al listar pagos para aprobación",
+      detail: error.message,
+    });
   }
 }
 
@@ -527,99 +550,155 @@ export async function listPaymentsForApproval(req, res) {
 /**
  * Decidir un pago (aprobar/rechazar)
  * PATCH /api/payments/:id/decision
- * body: { decision: "APPROVE" | "REJECT", comment?: string }
+ * body: {
+ *   decision: "APPROVE" | "REJECT",
+ *   comment?: string,
+ *   rejectionType?: "GENERAL" | "INVOICE_ERROR",
+ *   invoiceErrors?: string[]
+ * }
  * Acceso: ADMIN, APPROVER
  */
 export async function decidePayment(req, res) {
   try {
     const { id } = req.params;
-    const { decision, comment } = req.body;
+    const { decision, comment, rejectionType, invoiceErrors } = req.body;
     const userId = req.user?.id;
 
-    if (!decision || !['APPROVE', 'REJECT'].includes(decision)) {
-      return res.status(400).json({ error: 'decision debe ser APPROVE o REJECT' });
+    if (!decision || !["APPROVE", "REJECT"].includes(decision)) {
+      return res.status(400).json({
+        error: "decision debe ser APPROVE o REJECT",
+      });
     }
 
-    if (decision === 'REJECT') {
-      const c = String(comment || '').trim();
-      if (!c || c.length < 10) {
-        return res.status(400).json({ error: 'El comentario es obligatorio (mín. 10 caracteres) para rechazar.' });
+    const trimmedComment = String(comment || "").trim();
+
+    if (decision === "REJECT") {
+      if (!trimmedComment || trimmedComment.length < 10) {
+        return res.status(400).json({
+          error: "El comentario es obligatorio (mín. 10 caracteres) para rechazar.",
+        });
+      }
+
+      if (
+        rejectionType === "INVOICE_ERROR" &&
+        (!Array.isArray(invoiceErrors) || invoiceErrors.length === 0)
+      ) {
+        return res.status(400).json({
+          error: "Debes enviar al menos un error de factura para este tipo de rechazo.",
+        });
       }
     }
 
     const payment = await prisma.payment.findUnique({
-      where: { id: parseInt(id) },
+      where: { id: parseInt(id, 10) },
       include: {
-        purchaseOrder: { select: { id: true, number: true, provider: { select: { businessName: true } } } }
-      }
+        purchaseOrder: {
+          select: {
+            id: true,
+            number: true,
+            provider: { select: { businessName: true } },
+          },
+        },
+      },
     });
 
-    if (!payment) return res.status(404).json({ error: 'Pago no encontrado' });
-
-    if (payment.status !== 'PENDING') {
-      return res.status(409).json({ error: 'Este pago ya fue decidido', currentStatus: payment.status });
+    if (!payment) {
+      return res.status(404).json({ error: "Pago no encontrado" });
     }
 
-    const nextStatus = decision === 'APPROVE' ? 'APPROVED' : 'REJECTED';
+    if (payment.status !== "SUBMITTED") {
+      return res.status(409).json({
+        error: "Este pago no está disponible para revisión",
+        currentStatus: payment.status,
+      });
+    }
+
+    const nextStatus = decision === "APPROVE" ? "APPROVED" : "REJECTED";
 
     const updated = await prisma.payment.update({
-      where: { id: parseInt(id) },
+      where: { id: parseInt(id, 10) },
       data: {
         status: nextStatus,
         decidedById: userId,
         decidedAt: new Date(),
-        decisionComment: decision === 'REJECT' ? String(comment).trim() : null
+        decisionComment: trimmedComment || null,
+        rejectionType: decision === "REJECT" ? rejectionType || "GENERAL" : null,
+        invoiceErrorsJson:
+          decision === "REJECT"
+            ? Array.isArray(invoiceErrors)
+              ? invoiceErrors
+              : []
+            : null,
       },
       include: {
+        evidences: {
+          where: { isActive: true },
+          select: { id: true, kind: true, fileName: true, createdAt: true },
+        },
         decidedBy: { select: { id: true, fullName: true, email: true } },
         purchaseOrder: {
           select: {
             id: true,
             number: true,
             total: true,
-            provider: { select: { id: true, businessName: true } }
-          }
-        }
-      }
+            provider: { select: { id: true, businessName: true } },
+          },
+        },
+      },
     });
 
-    // Auditoría
     await prisma.auditLog.create({
       data: {
         actorId: userId,
-        action: decision === 'APPROVE' ? 'APPROVE_PAYMENT' : 'REJECT_PAYMENT',
-        entity: 'Payment',
+        action: decision === "APPROVE" ? "APPROVE_PAYMENT" : "REJECT_PAYMENT",
+        entity: "Payment",
         entityId: updated.id,
         meta: {
           purchaseOrderNumber: payment.purchaseOrder.number,
           providerName: payment.purchaseOrder.provider.businessName,
           decision,
-          comment: decision === 'REJECT' ? String(comment).trim() : null
-        }
-      }
+          comment: trimmedComment || null,
+          rejectionType: decision === "REJECT" ? rejectionType || "GENERAL" : null,
+          invoiceErrors:
+            decision === "REJECT"
+              ? Array.isArray(invoiceErrors)
+                ? invoiceErrors
+                : []
+              : [],
+        },
+      },
     });
 
     await logAudit(req, {
       actorId: userId ?? null,
-      action: decision === 'APPROVE' ? "PAYMENT_APPROVE" : "PAYMENT_REJECT",
+      action: decision === "APPROVE" ? "PAYMENT_APPROVE" : "PAYMENT_REJECT",
       entity: "Payment",
       entityId: updated.id,
       meta: {
         purchaseOrderNumber: payment.purchaseOrder.number,
         providerName: payment.purchaseOrder.provider.businessName,
         decision,
-        comment: decision === 'REJECT' ? String(comment).trim() : null
-      }
+        comment: trimmedComment || null,
+        rejectionType: decision === "REJECT" ? rejectionType || "GENERAL" : null,
+        invoiceErrors:
+          decision === "REJECT"
+            ? Array.isArray(invoiceErrors)
+              ? invoiceErrors
+              : []
+            : [],
+      },
     });
-
 
     res.json({
-      message: decision === 'APPROVE' ? 'Pago aprobado' : 'Pago rechazado',
-      payment: updated
+      message: decision === "APPROVE" ? "Pago aprobado" : "Pago rechazado",
+      payment: updated,
     });
   } catch (error) {
-    console.error('Error decidePayment:', error);
-    res.status(500).json({ error: 'Error al decidir pago', detail: error.message });
+    console.error("Error decidePayment:", error);
+    res.status(500).json({
+      error: "Error al decidir pago",
+      detail: error.message,
+    });
   }
 }
 
@@ -716,5 +795,166 @@ export async function markPaymentPaid(req, res) {
   } catch (error) {
     console.error("Error markPaymentPaid:", error);
     return res.status(500).json({ error: "Error al marcar pago como pagado", detail: error.message });
+  }
+}
+
+// =========================
+// PROVIDER: Mis parcialidades
+// GET /api/payments/my-plans
+// =========================
+export async function listMyPaymentPlans(req, res) {
+  try {
+    console.log("REQ.USER my-plans =>", req.user);
+
+    const providerId =
+      req.user?.providerId ??
+      req.user?.provider?.id ??
+      null;
+
+    console.log("providerId detectado =>", providerId);
+
+    if (!providerId) {
+      return res.status(400).json({
+        error: "No se pudo identificar el proveedor del usuario actual.",
+      });
+    }
+
+    const payments = await prisma.payment.findMany({
+      where: {
+        purchaseOrder: {
+          is: {
+            providerId,
+          },
+        },
+      },
+      include: {
+        evidences: true,
+        purchaseOrder: true,
+      },
+      orderBy: [
+        { purchaseOrderId: "asc" },
+        { installmentNo: "asc" },
+        { createdAt: "asc" },
+      ],
+    });
+
+    console.log("payments encontradas =>", payments.length);
+
+    return res.json({ payments });
+  } catch (error) {
+    console.error("Error listMyPaymentPlans FULL =>", error);
+    return res.status(500).json({
+      error: "Error al listar parcialidades del proveedor",
+      detail: error.message,
+    });
+  }
+}
+
+// =========================
+// PROVIDER: Enviar a revisión
+// PATCH /api/payments/:id/submit
+// =========================
+export async function submitPaymentForReview(req, res) {
+  try {
+    const paymentId = Number(req.params.id);
+
+    if (!Number.isFinite(paymentId)) {
+      return res.status(400).json({ error: "ID de pago inválido" });
+    }
+
+    const providerId =
+      req.user?.providerId ??
+      req.user?.provider?.id ??
+      null;
+
+    if (!providerId) {
+      return res.status(400).json({
+        error: "No se pudo identificar el proveedor del usuario actual.",
+      });
+    }
+
+    const payment = await prisma.payment.findFirst({
+      where: {
+        id: paymentId,
+        purchaseOrder: {
+          is: {
+            providerId,
+          },
+        },
+      },
+      include: {
+        evidences: {
+          where: { isActive: true },
+          select: { id: true, kind: true, fileName: true },
+        },
+      },
+    });
+
+    if (!payment) {
+      return res.status(404).json({
+        error: "Parcialidad no encontrada para este proveedor.",
+      });
+    }
+
+    if (payment.status !== "PENDING" && payment.status !== "REJECTED") {
+      return res.status(409).json({
+        error: "Solo se pueden enviar a revisión parcialidades en estado PENDING o REJECTED.",
+        currentStatus: payment.status,
+      });
+    }
+
+    const hasPdf = payment.evidences.some(
+      (e) => String(e.kind || "").toUpperCase() === "PDF"
+    );
+    const hasXml = payment.evidences.some(
+      (e) => String(e.kind || "").toUpperCase() === "XML"
+    );
+
+    if (!hasPdf || !hasXml) {
+      return res.status(400).json({
+        error: "Debes subir al menos un PDF y un XML antes de enviar a revisión.",
+      });
+    }
+
+    const updated = await prisma.payment.update({
+      where: { id: paymentId },
+      data: {
+        status: "SUBMITTED",
+        decidedAt: null,
+        decidedById: null,
+        decisionComment: null,
+        rejectionType: null,
+        invoiceErrorsJson: null,
+      },
+      include: {
+        evidences: {
+          where: { isActive: true },
+          select: { id: true, kind: true, fileName: true },
+        },
+        purchaseOrder: {
+          select: {
+            id: true,
+            number: true,
+            provider: {
+              select: {
+                id: true,
+                businessName: true,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    return res.json({
+      message: "Parcialidad enviada a revisión",
+      payment: updated,
+    });
+  } catch (error) {
+    console.error("Error submitPaymentForReview:", error);
+    return res.status(500).json({
+      error: "Error al enviar parcialidad a revisión",
+      detail: error.message,
+    });
   }
 }

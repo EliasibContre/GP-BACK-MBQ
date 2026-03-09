@@ -12,6 +12,8 @@ import {
   listPaymentsForApproval,
   decidePayment,
   markPaymentPaid,
+  listMyPaymentPlans,
+  submitPaymentForReview,
 } from "../controllers/payment.controller.js";
 import { createPaymentPlan } from "../controllers/paymentPlan.controller.js";
 
@@ -24,7 +26,7 @@ router.get("/", requireAuth, listPayments);
 
 /**
  * GET /api/payments/approval - Listar pagos para aprobación
- * ⚠️ Debe ir ANTES que /:id
+ * ⚠️ Debe ir antes que /:id
  */
 router.get(
   "/approval",
@@ -34,19 +36,68 @@ router.get(
 );
 
 /**
+ * GET /api/payments/my-plans - Listar parcialidades del proveedor autenticado
+ * ⚠️ Debe ir antes que /:id
+ */
+router.get(
+  "/my-plans",
+  requireAuth,
+  requireRole(["PROVIDER"]),
+  listMyPaymentPlans
+);
+
+/**
  * POST /api/payments - Crear pago
  */
-router.post("/", requireAuth, requireRole(["ADMIN", "APPROVER"]), createPayment);
+router.post(
+  "/",
+  requireAuth,
+  requireRole(["ADMIN", "APPROVER"]),
+  createPayment
+);
+
+/**
+ * POST /api/payments/plans - Crear plan de pagos
+ * ⚠️ Debe ir antes que /:id
+ */
+router.post(
+  "/plans",
+  requireAuth,
+  requireRole(["ADMIN", "APPROVER"]),
+  createPaymentPlan
+);
 
 /**
  * PATCH /api/payments/:id/decision - Aprobar/Rechazar
- * ⚠️ Debe ir ANTES que /:id (por claridad)
+ * ⚠️ Debe ir antes que /:id
  */
 router.patch(
   "/:id/decision",
   requireAuth,
   requireRole(["ADMIN", "APPROVER"]),
   decidePayment
+);
+
+/**
+ * PATCH /api/payments/:id/submit - Proveedor envía parcialidad a revisión
+ * ⚠️ Debe ir antes que /:id
+ */
+router.patch(
+  "/:id/submit",
+  requireAuth,
+  requireRole(["PROVIDER"]),
+  submitPaymentForReview
+);
+
+/**
+ * PATCH /api/payments/:id/mark-paid - Marcar como pagado
+ * ⚠️ Debe ir antes que /:id
+ */
+router.patch(
+  "/:id/mark-paid",
+  requireAuth,
+  requireRole(["ADMIN", "APPROVER"]),
+  markPaymentPaid
 );
 
 /**
@@ -67,8 +118,11 @@ router.put(
 /**
  * DELETE /api/payments/:id - Eliminar pago
  */
-router.delete("/:id", requireAuth, requireRole(["ADMIN"]), deletePayment);
-router.post("/plans", createPaymentPlan);
-router.patch("/:id/mark-paid", requireAuth, requireRole(["ADMIN", "APPROVER"]), markPaymentPaid);
+router.delete(
+  "/:id",
+  requireAuth,
+  requireRole(["ADMIN"]),
+  deletePayment
+);
 
 export default router;

@@ -117,10 +117,9 @@ export async function listPaymentEvidence(req, res) {
     await ensurePaymentExists(paymentId);
 
     const rows = await prisma.paymentEvidence.findMany({
-        where: { paymentId },
+        where: { paymentId, isActive: true },
         orderBy: [{ kind: "asc" }, { version: "desc" }, { createdAt: "desc" }],
     });
-
     return res.json(rows);
 }
 
