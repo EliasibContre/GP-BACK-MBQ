@@ -1,3 +1,4 @@
+// src/services/accessRequest.service.js
 import { prisma } from '../config/prisma.js';
 import { sendAccessRequestAckEmail, sendTemporaryPasswordEmail, sendAccessRequestRejectedEmail } from '../utils/email.js';
 import { hashPassword } from '../utils/password.js';

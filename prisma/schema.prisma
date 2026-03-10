@@ -287,6 +287,7 @@ model Invoice {
 }
 
 model Payment {
+<<<<<<< Updated upstream
   id              Int               @id @default(autoincrement())
   amount          Decimal           @db.Decimal(14, 2)
   paidAt          DateTime
@@ -300,15 +301,30 @@ model Payment {
   decidedById     Int?
   decisionComment String?
   rejectionType   String?
+=======
+  id                Int               @id @default(autoincrement())
+  amount            Decimal           @db.Decimal(14, 2)
+  paidAt            DateTime
+  method            PaymentMethod     @default(TRANSFER)
+  reference         String?
+  createdAt         DateTime          @default(now())
+  purchaseOrderId   Int
+  createdById       Int?
+  decidedAt         DateTime?
+  decidedById       Int?
+  decisionComment   String?
+  installmentNo     Int?
+  installmentOf     Int?
+  status            PaymentStatus     @default(PENDING)
+  isScheduled       Boolean           @default(false)
+>>>>>>> Stashed changes
   invoiceErrorsJson Json?
-  installmentNo   Int?
-  installmentOf   Int?
-  status          PaymentStatus     @default(PENDING)
-  isScheduled     Boolean           @default(false)
-  createdBy       User?             @relation("PaymentCreatedBy", fields: [createdById], references: [id])
-  decidedBy       User?             @relation("PaymentDecidedBy", fields: [decidedById], references: [id])
-  purchaseOrder   PurchaseOrder     @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
-  evidences       PaymentEvidence[]
+  rejectionType     String?
+  closeAt           DateTime?
+  createdBy         User?             @relation("PaymentCreatedBy", fields: [createdById], references: [id])
+  decidedBy         User?             @relation("PaymentDecidedBy", fields: [decidedById], references: [id])
+  purchaseOrder     PurchaseOrder     @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  evidences         PaymentEvidence[]
 
   @@index([purchaseOrderId])
   @@index([status])
@@ -392,10 +408,10 @@ model AccessRequest {
 
 enum PaymentStatus {
   PENDING
-  SUBMITTED
   APPROVED
   REJECTED
   PAID
+  SUBMITTED
 }
 
 enum EvidenceKind {

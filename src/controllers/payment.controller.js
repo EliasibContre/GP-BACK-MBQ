@@ -1,7 +1,7 @@
 // src/controllers/payment.controller.js
-import { prisma } from '../config/prisma.js';
-import { createNotification } from '../services/notification.service.js';
-import { sendPaymentRegisteredEmail } from '../utils/email.js';
+import { prisma } from "../config/prisma.js";
+import { createNotification } from "../services/notification.service.js";
+import { sendPaymentRegisteredEmail } from "../utils/email.js";
 import { logAudit } from "../utils/audit.js";
 
 /**
@@ -23,40 +23,59 @@ export async function createPayment(req, res) {
     } = req.body;
     const userId = req.user?.id;
     const roles = (req.user && req.user.roles) || [];
-    const isProviderRole = roles.some(r => String(r.name).toUpperCase() === 'PROVIDER');
+    const isProviderRole = roles.some(
+      (r) => String(r.name).toUpperCase() === "PROVIDER",
+    );
 
     // Validar campos requeridos
     if (!purchaseOrderId || !amount || !paidAt) {
       return res.status(400).json({
-        error: 'purchaseOrderId, amount y paidAt son requeridos'
+        error: "purchaseOrderId, amount y paidAt son requeridos",
       });
     }
 
     // Validar que la orden existe (incluye contacto del proveedor)
     const po = await prisma.purchaseOrder.findUnique({
       where: { id: parseInt(purchaseOrderId) },
-      include: { provider: { select: { id: true, businessName: true, emailContacto: true, contacts: { select: { email: true } } } } }
+      include: {
+        provider: {
+          select: {
+            id: true,
+            businessName: true,
+            emailContacto: true,
+            contacts: { select: { email: true } },
+          },
+        },
+      },
     });
 
     if (!po) {
-      return res.status(404).json({ error: 'Orden de compra no encontrada' });
+      return res.status(404).json({ error: "Orden de compra no encontrada" });
     }
 
-    if (po.status !== 'APPROVED') {
+    if (po.status !== "APPROVED") {
       return res.status(400).json({
-        error: 'Solo se pueden pagar órdenes aprobadas (APPROVED)',
-        currentStatus: po.status
+        error: "Solo se pueden pagar órdenes aprobadas (APPROVED)",
+        currentStatus: po.status,
       });
     }
 
     // Si es proveedor en sesión, validar que la orden le pertenece
     if (isProviderRole) {
       const provider = await prisma.provider.findFirst({
-        where: { emailContacto: req.user.email, isActive: true, deletedAt: null },
-        select: { id: true }
+        where: {
+          emailContacto: req.user.email,
+          isActive: true,
+          deletedAt: null,
+        },
+        select: { id: true },
       });
       if (!provider || provider.id !== po.provider.id) {
-        return res.status(403).json({ error: 'No puedes registrar pagos para órdenes de otro proveedor' });
+        return res
+          .status(403)
+          .json({
+            error: "No puedes registrar pagos para órdenes de otro proveedor",
+          });
       }
     }
 
@@ -66,14 +85,14 @@ export async function createPayment(req, res) {
         purchaseOrderId: parseInt(purchaseOrderId),
         paidAt: {
           gte: new Date(new Date(paidAt).setHours(0, 0, 0, 0)),
-          lte: new Date(new Date(paidAt).setHours(23, 59, 59, 999))
-        }
-      }
+          lte: new Date(new Date(paidAt).setHours(23, 59, 59, 999)),
+        },
+      },
     });
 
     if (existingPayment) {
       return res.status(400).json({
-        error: 'Ya existe un pago registrado para esta orden en esta fecha'
+        error: "Ya existe un pago registrado para esta orden en esta fecha",
       });
     }
 
@@ -89,7 +108,7 @@ export async function createPayment(req, res) {
         createdById: userId ?? null,
         installmentNo: installmentNo != null ? parseInt(installmentNo) : null,
         installmentOf: installmentOf != null ? parseInt(installmentOf) : null,
-        isScheduled: Boolean(isScheduled)
+        isScheduled: Boolean(isScheduled),
       },
       include: {
         purchaseOrder: {
@@ -97,19 +116,18 @@ export async function createPayment(req, res) {
             id: true,
             number: true,
             total: true,
-            provider: { select: { id: true, businessName: true } }
-          }
-        }
-      }
+            provider: { select: { id: true, businessName: true } },
+          },
+        },
+      },
     });
 
     // Registrar en auditoría
     await prisma.auditLog.create({
       data: {
-
         actorId: userId,
-        action: 'CREATE_PAYMENT',
-        entity: 'Payment',
+        action: "CREATE_PAYMENT",
+        entity: "Payment",
         entityId: payment.id,
         meta: {
           purchaseOrderId: parseInt(purchaseOrderId),
@@ -120,9 +138,9 @@ export async function createPayment(req, res) {
           isScheduled: Boolean(isScheduled),
           providerName: po.provider.businessName,
           installmentNo: installmentNo != null ? parseInt(installmentNo) : null,
-          installmentOf: installmentOf != null ? parseInt(installmentOf) : null
-        }
-      }
+          installmentOf: installmentOf != null ? parseInt(installmentOf) : null,
+        },
+      },
     });
 
     await logAudit(req, {
@@ -138,29 +156,31 @@ export async function createPayment(req, res) {
         reference: reference ?? null,
         providerName: po.provider.businessName,
         installmentNo: installmentNo != null ? parseInt(installmentNo) : null,
-        installmentOf: installmentOf != null ? parseInt(installmentOf) : null
-      }
+        installmentOf: installmentOf != null ? parseInt(installmentOf) : null,
+      },
     });
 
     console.log(`✅ Pago creado: OC ${po.number}, Monto $${amount}`);
 
     res.status(201).json({
-      message: 'Pago registrado correctamente',
-      payment
+      message: "Pago registrado correctamente",
+      payment,
     });
 
     // Crear notificaciones internas (usuarios de finanzas / administradores)
     try {
       // Buscar usuarios con rol FINANZAS; si no hay, fallback a ADMIN/APPROVER
       let financeUsers = await prisma.user.findMany({
-        where: { roles: { some: { role: { name: 'FINANZAS' } } } },
-        select: { id: true, email: true }
+        where: { roles: { some: { role: { name: "FINANZAS" } } } },
+        select: { id: true, email: true },
       });
 
       if (!financeUsers || financeUsers.length === 0) {
         financeUsers = await prisma.user.findMany({
-          where: { roles: { some: { role: { name: { in: ['ADMIN', 'APPROVER'] } } } } },
-          select: { id: true, email: true }
+          where: {
+            roles: { some: { role: { name: { in: ["ADMIN", "APPROVER"] } } } },
+          },
+          select: { id: true, email: true },
         });
       }
 
@@ -170,29 +190,45 @@ export async function createPayment(req, res) {
       for (const u of financeUsers) {
         await createNotification({
           userId: u.id,
-          type: 'PAYMENT_CREATED',
-          entityType: 'PAYMENT',
+          type: "PAYMENT_CREATED",
+          entityType: "PAYMENT",
           entityId: payment.id,
           title,
           message,
-          data: { paymentId: payment.id, purchaseOrderId: po.id, amount, installmentNo: payment.installmentNo, installmentOf: payment.installmentOf }
+          data: {
+            paymentId: payment.id,
+            purchaseOrderId: po.id,
+            amount,
+            installmentNo: payment.installmentNo,
+            installmentOf: payment.installmentOf,
+          },
         });
       }
 
       // Notificar al proveedor por notificación + correo si tiene email
-      const providerEmail = po.provider?.emailContacto || (po.provider?.contacts && po.provider.contacts[0]?.email);
+      const providerEmail =
+        po.provider?.emailContacto ||
+        (po.provider?.contacts && po.provider.contacts[0]?.email);
       if (providerEmail) {
         // Create a notification if we have an associated user for provider (best-effort: try match by email)
-        const providerUser = await prisma.user.findUnique({ where: { email: providerEmail } });
+        const providerUser = await prisma.user.findUnique({
+          where: { email: providerEmail },
+        });
         if (providerUser) {
           await createNotification({
             userId: providerUser.id,
-            type: 'PAYMENT_CREATED',
-            entityType: 'PAYMENT',
+            type: "PAYMENT_CREATED",
+            entityType: "PAYMENT",
             entityId: payment.id,
             title: `Pago recibido - OC ${po.number}`,
             message: `Se registró el pago de ${amount} para la orden ${po.number}.`,
-            data: { paymentId: payment.id, purchaseOrderId: po.id, amount, installmentNo: payment.installmentNo, installmentOf: payment.installmentOf }
+            data: {
+              paymentId: payment.id,
+              purchaseOrderId: po.id,
+              amount,
+              installmentNo: payment.installmentNo,
+              installmentOf: payment.installmentOf,
+            },
           });
         }
 
@@ -200,15 +236,23 @@ export async function createPayment(req, res) {
         try {
           await sendPaymentRegisteredEmail(providerEmail, payment, po);
         } catch (mailErr) {
-          console.warn('No se pudo enviar email al proveedor:', mailErr.message || mailErr);
+          console.warn(
+            "No se pudo enviar email al proveedor:",
+            mailErr.message || mailErr,
+          );
         }
       }
     } catch (notifyErr) {
-      console.error('Error creando notificaciones / correos tras crear pago:', notifyErr);
+      console.error(
+        "Error creando notificaciones / correos tras crear pago:",
+        notifyErr,
+      );
     }
   } catch (error) {
-    console.error('Error createPayment:', error);
-    res.status(500).json({ error: 'Error al registrar pago', detail: error.message });
+    console.error("Error createPayment:", error);
+    res
+      .status(500)
+      .json({ error: "Error al registrar pago", detail: error.message });
   }
 }
 
@@ -224,11 +268,11 @@ export async function updatePayment(req, res) {
 
     const payment = await prisma.payment.findUnique({
       where: { id: parseInt(id) },
-      include: { purchaseOrder: { select: { number: true } } }
+      include: { purchaseOrder: { select: { number: true } } },
     });
 
     if (!payment) {
-      return res.status(404).json({ error: 'Pago no encontrado' });
+      return res.status(404).json({ error: "Pago no encontrado" });
     }
 
     const updateData = {};
@@ -238,7 +282,7 @@ export async function updatePayment(req, res) {
     if (reference !== undefined) updateData.reference = reference;
 
     if (Object.keys(updateData).length === 0) {
-      return res.status(400).json({ error: 'No hay campos para actualizar' });
+      return res.status(400).json({ error: "No hay campos para actualizar" });
     }
 
     const updatedPayment = await prisma.payment.update({
@@ -250,21 +294,21 @@ export async function updatePayment(req, res) {
             id: true,
             number: true,
             total: true,
-            provider: { select: { businessName: true } }
-          }
-        }
-      }
+            provider: { select: { businessName: true } },
+          },
+        },
+      },
     });
 
     // Registrar en auditoría
     await prisma.auditLog.create({
       data: {
         actorId: userId,
-        action: 'UPDATE_PAYMENT',
-        entity: 'Payment',
+        action: "UPDATE_PAYMENT",
+        entity: "Payment",
         entityId: parseInt(id),
-        meta: { updatedFields: Object.keys(updateData) }
-      }
+        meta: { updatedFields: Object.keys(updateData) },
+      },
     });
 
     await logAudit(req, {
@@ -272,17 +316,18 @@ export async function updatePayment(req, res) {
       action: "PAYMENT_UPDATE",
       entity: "Payment",
       entityId: parseInt(id),
-      meta: { updatedFields: Object.keys(updateData) }
+      meta: { updatedFields: Object.keys(updateData) },
     });
-
 
     res.json({
-      message: 'Pago actualizado correctamente',
-      payment: updatedPayment
+      message: "Pago actualizado correctamente",
+      payment: updatedPayment,
     });
   } catch (error) {
-    console.error('Error updatePayment:', error);
-    res.status(500).json({ error: 'Error al actualizar pago', detail: error.message });
+    console.error("Error updatePayment:", error);
+    res
+      .status(500)
+      .json({ error: "Error al actualizar pago", detail: error.message });
   }
 }
 
@@ -297,29 +342,36 @@ export async function deletePayment(req, res) {
 
     const payment = await prisma.payment.findUnique({
       where: { id: parseInt(id) },
-      include: { purchaseOrder: { select: { number: true, provider: { select: { businessName: true } } } } }
+      include: {
+        purchaseOrder: {
+          select: {
+            number: true,
+            provider: { select: { businessName: true } },
+          },
+        },
+      },
     });
 
     if (!payment) {
-      return res.status(404).json({ error: 'Pago no encontrado' });
+      return res.status(404).json({ error: "Pago no encontrado" });
     }
 
     await prisma.payment.delete({
-      where: { id: parseInt(id) }
+      where: { id: parseInt(id) },
     });
 
     // Registrar en auditoría
     await prisma.auditLog.create({
       data: {
         actorId: userId,
-        action: 'DELETE_PAYMENT',
-        entity: 'Payment',
+        action: "DELETE_PAYMENT",
+        entity: "Payment",
         entityId: parseInt(id),
         meta: {
           purchaseOrderNumber: payment.purchaseOrder.number,
-          providerName: payment.purchaseOrder.provider.businessName
-        }
-      }
+          providerName: payment.purchaseOrder.provider.businessName,
+        },
+      },
     });
 
     await logAudit(req, {
@@ -329,17 +381,18 @@ export async function deletePayment(req, res) {
       entityId: parseInt(id),
       meta: {
         purchaseOrderNumber: payment.purchaseOrder.number,
-        providerName: payment.purchaseOrder.provider.businessName
-      }
+        providerName: payment.purchaseOrder.provider.businessName,
+      },
     });
-
 
     console.log(`🗑️ Pago eliminado: OC ${payment.purchaseOrder.number}`);
 
-    res.json({ message: 'Pago eliminado correctamente' });
+    res.json({ message: "Pago eliminado correctamente" });
   } catch (error) {
-    console.error('Error deletePayment:', error);
-    res.status(500).json({ error: 'Error al eliminar pago', detail: error.message });
+    console.error("Error deletePayment:", error);
+    res
+      .status(500)
+      .json({ error: "Error al eliminar pago", detail: error.message });
   }
 }
 
@@ -367,52 +420,45 @@ export async function listPayments(req, res) {
       prisma.payment.findMany({
         where,
         include: {
-          evidences: {
-            where: {
-              isActive: true
-            }, select: {
-              id: true, kind: true, fileName: true, createdAt: true
-            }
-          },
           purchaseOrder: {
             select: {
               id: true,
               number: true,
               status: true,
               total: true,
-              receivedAt: true,
               provider: {
                 select: {
                   id: true,
                   businessName: true,
-                  rfc: true
-                }
-              }
-            }
-          }
+                },
+              },
+            },
+          },
         },
-        orderBy: { paidAt: 'desc' },
-        take: parseInt(limit),
-        skip: parseInt(offset)
+        orderBy: { paidAt: "desc" },
+        take: parseInt(limit, 10),
+        skip: parseInt(offset, 10),
       }),
-      prisma.payment.count({ where })
+      prisma.payment.count({ where }),
     ]);
 
-    res.json({
+    return res.json({
       payments,
       pagination: {
         total,
-        limit: parseInt(limit),
-        offset: parseInt(offset),
-        hasMore: parseInt(offset) + parseInt(limit) < total
-      }
+        limit: parseInt(limit, 10),
+        offset: parseInt(offset, 10),
+        hasMore: parseInt(offset, 10) + parseInt(limit, 10) < total,
+      },
     });
   } catch (error) {
-    console.error('Error listPayments:', error);
-    res.status(500).json({ error: 'Error al listar pagos', detail: error.message });
+    console.error("Error listPayments:", error);
+    return res.status(500).json({
+      error: "Error al listar pagos",
+      detail: error.message,
+    });
   }
 }
-
 /**
  * Obtener un pago específico
  * GET /api/payments/:id
@@ -508,7 +554,11 @@ export async function listPaymentsForApproval(req, res) {
       where.OR = [
         { reference: { contains: q, mode: "insensitive" } },
         { purchaseOrder: { number: { contains: q, mode: "insensitive" } } },
-        { purchaseOrder: { provider: { businessName: { contains: q, mode: "insensitive" } } } },
+        {
+          purchaseOrder: {
+            provider: { businessName: { contains: q, mode: "insensitive" } },
+          },
+        },
         { decidedBy: { fullName: { contains: q, mode: "insensitive" } } },
       ];
     }
@@ -519,7 +569,13 @@ export async function listPaymentsForApproval(req, res) {
         include: {
           evidences: {
             where: { isActive: true },
-            select: { id: true, kind: true, fileName: true, createdAt: true, isActive: true },
+            select: {
+              id: true,
+              kind: true,
+              fileName: true,
+              createdAt: true,
+              isActive: true,
+            },
           },
           decidedBy: { select: { id: true, fullName: true, email: true } },
           createdBy: { select: { id: true, fullName: true, email: true } },
@@ -558,7 +614,6 @@ export async function listPaymentsForApproval(req, res) {
   }
 }
 
-
 /**
  * Decidir un pago (aprobar/rechazar)
  * PATCH /api/payments/:id/decision
@@ -587,7 +642,8 @@ export async function decidePayment(req, res) {
     if (decision === "REJECT") {
       if (!trimmedComment || trimmedComment.length < 10) {
         return res.status(400).json({
-          error: "El comentario es obligatorio (mín. 10 caracteres) para rechazar.",
+          error:
+            "El comentario es obligatorio (mín. 10 caracteres) para rechazar.",
         });
       }
 
@@ -596,7 +652,8 @@ export async function decidePayment(req, res) {
         (!Array.isArray(invoiceErrors) || invoiceErrors.length === 0)
       ) {
         return res.status(400).json({
-          error: "Debes enviar al menos un error de factura para este tipo de rechazo.",
+          error:
+            "Debes enviar al menos un error de factura para este tipo de rechazo.",
         });
       }
     }
@@ -634,7 +691,8 @@ export async function decidePayment(req, res) {
         decidedById: userId,
         decidedAt: new Date(),
         decisionComment: trimmedComment || null,
-        rejectionType: decision === "REJECT" ? rejectionType || "GENERAL" : null,
+        rejectionType:
+          decision === "REJECT" ? rejectionType || "GENERAL" : null,
         invoiceErrorsJson:
           decision === "REJECT"
             ? Array.isArray(invoiceErrors)
@@ -670,7 +728,8 @@ export async function decidePayment(req, res) {
           providerName: payment.purchaseOrder.provider.businessName,
           decision,
           comment: trimmedComment || null,
-          rejectionType: decision === "REJECT" ? rejectionType || "GENERAL" : null,
+          rejectionType:
+            decision === "REJECT" ? rejectionType || "GENERAL" : null,
           invoiceErrors:
             decision === "REJECT"
               ? Array.isArray(invoiceErrors)
@@ -691,7 +750,8 @@ export async function decidePayment(req, res) {
         providerName: payment.purchaseOrder.provider.businessName,
         decision,
         comment: trimmedComment || null,
-        rejectionType: decision === "REJECT" ? rejectionType || "GENERAL" : null,
+        rejectionType:
+          decision === "REJECT" ? rejectionType || "GENERAL" : null,
         invoiceErrors:
           decision === "REJECT"
             ? Array.isArray(invoiceErrors)
@@ -733,10 +793,10 @@ export async function markPaymentPaid(req, res) {
           select: {
             id: true,
             number: true,
-            provider: { select: { id: true, businessName: true } }
-          }
-        }
-      }
+            provider: { select: { id: true, businessName: true } },
+          },
+        },
+      },
     });
 
     if (!payment) return res.status(404).json({ error: "Pago no encontrado" });
@@ -745,7 +805,7 @@ export async function markPaymentPaid(req, res) {
     if (payment.status !== "APPROVED") {
       return res.status(409).json({
         error: "Solo puedes marcar como pagado un pago APPROVED",
-        currentStatus: payment.status
+        currentStatus: payment.status,
       });
     }
 
@@ -754,12 +814,12 @@ export async function markPaymentPaid(req, res) {
       data: {
         status: "PAID",
         // si mandan nota, la guardamos en reference (opción A, sin crear columnas nuevas)
-        reference: note ? String(note).trim().slice(0, 120) : payment.reference
+        reference: note ? String(note).trim().slice(0, 120) : payment.reference,
       },
       include: {
         evidences: {
           where: { isActive: true },
-          select: { id: true, kind: true, fileName: true, createdAt: true }
+          select: { id: true, kind: true, fileName: true, createdAt: true },
         },
         purchaseOrder: {
           select: {
@@ -767,10 +827,10 @@ export async function markPaymentPaid(req, res) {
             number: true,
             total: true,
             status: true,
-            provider: { select: { id: true, businessName: true, rfc: true } }
-          }
-        }
-      }
+            provider: { select: { id: true, businessName: true, rfc: true } },
+          },
+        },
+      },
     });
 
     // Auditoría
@@ -783,9 +843,9 @@ export async function markPaymentPaid(req, res) {
         meta: {
           purchaseOrderNumber: payment.purchaseOrder.number,
           providerName: payment.purchaseOrder.provider.businessName,
-          note: note ? String(note).trim() : null
-        }
-      }
+          note: note ? String(note).trim() : null,
+        },
+      },
     });
 
     await logAudit(req, {
@@ -796,17 +856,22 @@ export async function markPaymentPaid(req, res) {
       meta: {
         purchaseOrderNumber: payment.purchaseOrder.number,
         providerName: payment.purchaseOrder.provider.businessName,
-        note: note ? String(note).trim() : null
-      }
+        note: note ? String(note).trim() : null,
+      },
     });
 
     return res.json({
       message: "Pago marcado como pagado",
-      payment: updated
+      payment: updated,
     });
   } catch (error) {
     console.error("Error markPaymentPaid:", error);
-    return res.status(500).json({ error: "Error al marcar pago como pagado", detail: error.message });
+    return res
+      .status(500)
+      .json({
+        error: "Error al marcar pago como pagado",
+        detail: error.message,
+      });
   }
 }
 
@@ -835,7 +900,11 @@ async function resolveProviderIdFromSession(req) {
 // =========================
 export async function listMyPaymentPlans(req, res) {
   try {
-    const providerId = await resolveProviderIdFromSession(req);
+    console.log("REQ.USER my-plans =>", req.user);
+
+    const providerId = req.user?.providerId ?? req.user?.provider?.id ?? null;
+
+    console.log("providerId detectado =>", providerId);
 
     if (!providerId) {
       return res.status(400).json({
@@ -897,7 +966,7 @@ export async function submitPaymentForReview(req, res) {
       return res.status(400).json({ error: "ID de pago inválido" });
     }
 
-    const providerId = await resolveProviderIdFromSession(req);
+    const providerId = req.user?.providerId ?? req.user?.provider?.id ?? null;
 
     if (!providerId) {
       return res.status(400).json({
@@ -930,21 +999,23 @@ export async function submitPaymentForReview(req, res) {
 
     if (payment.status !== "PENDING" && payment.status !== "REJECTED") {
       return res.status(409).json({
-        error: "Solo se pueden enviar a revisión parcialidades en estado PENDING o REJECTED.",
+        error:
+          "Solo se pueden enviar a revisión parcialidades en estado PENDING o REJECTED.",
         currentStatus: payment.status,
       });
     }
 
     const hasPdf = payment.evidences.some(
-      (e) => String(e.kind || "").toUpperCase() === "PDF"
+      (e) => String(e.kind || "").toUpperCase() === "PDF",
     );
     const hasXml = payment.evidences.some(
-      (e) => String(e.kind || "").toUpperCase() === "XML"
+      (e) => String(e.kind || "").toUpperCase() === "XML",
     );
 
     if (!hasPdf || !hasXml) {
       return res.status(400).json({
-        error: "Debes subir al menos un PDF y un XML antes de enviar a revisión.",
+        error:
+          "Debes subir al menos un PDF y un XML antes de enviar a revisión.",
       });
     }
 
