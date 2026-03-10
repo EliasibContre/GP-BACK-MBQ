@@ -4,6 +4,7 @@ import {
   getPaymentStatusTimings,
   getDashboardStats,
   getProviderDashboardStats,
+  getApproverDashboardStats,
   getActivityLog,
 } from "../controllers/analytics.controller.js";
 
@@ -19,9 +20,27 @@ router.get("/dashboard", requireAuth, requireRole("ADMIN"), getDashboardStats);
 router.get("/activity", requireAuth, requireRole("ADMIN"), getActivityLog);
 
 // Payment status timings - Admin only
-router.get("/payment-timings", requireAuth, requireRole("ADMIN"), getPaymentStatusTimings);
+router.get(
+  "/payment-timings",
+  requireAuth,
+  requireRole("ADMIN"),
+  getPaymentStatusTimings
+);
 
-// Provider dashboard stats - Provider only (recomendado)
-router.get("/provider-dashboard", requireAuth, requireRole("PROVIDER"), getProviderDashboardStats);
+// Provider dashboard stats - Provider only
+router.get(
+  "/provider-dashboard",
+  requireAuth,
+  requireRole("PROVIDER"),
+  getProviderDashboardStats
+);
+
+// ✅ Approver dashboard stats - Approver only
+router.get(
+  "/approver-dashboard",
+  requireAuth,
+  requireRole("APPROVER"),
+  getApproverDashboardStats
+);
 
 export default router;

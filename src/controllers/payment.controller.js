@@ -1,8 +1,64 @@
 // src/controllers/payment.controller.js
 import { prisma } from "../config/prisma.js";
+import { supabase } from "../config/supabase.js";
 import { createNotification } from "../services/notification.service.js";
 import { sendPaymentRegisteredEmail } from "../utils/email.js";
 import { logAudit } from "../utils/audit.js";
+
+const SIGNED_URL_EXPIRES = Number(process.env.SIGNED_URL_EXPIRES || 3600);
+
+async function attachSignedUrlToEvidence(evidence) {
+  if (!evidence) return evidence;
+
+  let url = null;
+
+  try {
+    if (evidence.bucket && evidence.path) {
+      const { data, error } = await supabase.storage
+        .from(evidence.bucket)
+        .createSignedUrl(evidence.path, SIGNED_URL_EXPIRES);
+
+      if (!error) {
+        url = data?.signedUrl || null;
+      } else {
+        console.warn(
+          "No se pudo firmar URL de evidencia:",
+          evidence.id,
+          error.message
+        );
+      }
+    }
+  } catch (err) {
+    console.warn(
+      "Error generando signed URL para evidencia:",
+      evidence?.id,
+      err?.message || err
+    );
+  }
+
+  return {
+    ...evidence,
+    url,
+  };
+}
+
+async function attachSignedUrlsToEvidences(evidences = []) {
+  return Promise.all((evidences || []).map(attachSignedUrlToEvidence));
+}
+
+async function attachSignedUrlsToPayment(payment) {
+  if (!payment) return payment;
+
+  const evidences = await attachSignedUrlsToEvidences(payment.evidences || []);
+  return {
+    ...payment,
+    evidences,
+  };
+}
+
+async function attachSignedUrlsToPayments(payments = []) {
+  return Promise.all((payments || []).map(attachSignedUrlsToPayment));
+}
 
 /**
  * Crear un nuevo pago
@@ -19,22 +75,21 @@ export async function createPayment(req, res) {
       reference,
       isScheduled,
       installmentNo,
-      installmentOf
+      installmentOf,
     } = req.body;
+
     const userId = req.user?.id;
     const roles = (req.user && req.user.roles) || [];
     const isProviderRole = roles.some(
-      (r) => String(r.name).toUpperCase() === "PROVIDER",
+      (r) => String(r.name).toUpperCase() === "PROVIDER"
     );
 
-    // Validar campos requeridos
     if (!purchaseOrderId || !amount || !paidAt) {
       return res.status(400).json({
         error: "purchaseOrderId, amount y paidAt son requeridos",
       });
     }
 
-    // Validar que la orden existe (incluye contacto del proveedor)
     const po = await prisma.purchaseOrder.findUnique({
       where: { id: parseInt(purchaseOrderId) },
       include: {
@@ -60,7 +115,6 @@ export async function createPayment(req, res) {
       });
     }
 
-    // Si es proveedor en sesión, validar que la orden le pertenece
     if (isProviderRole) {
       const provider = await prisma.provider.findFirst({
         where: {
@@ -70,16 +124,14 @@ export async function createPayment(req, res) {
         },
         select: { id: true },
       });
+
       if (!provider || provider.id !== po.provider.id) {
-        return res
-          .status(403)
-          .json({
-            error: "No puedes registrar pagos para órdenes de otro proveedor",
-          });
+        return res.status(403).json({
+          error: "No puedes registrar pagos para órdenes de otro proveedor",
+        });
       }
     }
 
-    // Validar que no exista un pago duplicado en la misma fecha
     const existingPayment = await prisma.payment.findFirst({
       where: {
         purchaseOrderId: parseInt(purchaseOrderId),
@@ -96,7 +148,6 @@ export async function createPayment(req, res) {
       });
     }
 
-    // Crear pago
     const payment = await prisma.payment.create({
       data: {
         purchaseOrderId: parseInt(purchaseOrderId),
@@ -122,7 +173,6 @@ export async function createPayment(req, res) {
       },
     });
 
-    // Registrar en auditoría
     await prisma.auditLog.create({
       data: {
         actorId: userId,
@@ -167,9 +217,7 @@ export async function createPayment(req, res) {
       payment,
     });
 
-    // Crear notificaciones internas (usuarios de finanzas / administradores)
     try {
-      // Buscar usuarios con rol FINANZAS; si no hay, fallback a ADMIN/APPROVER
       let financeUsers = await prisma.user.findMany({
         where: { roles: { some: { role: { name: "FINANZAS" } } } },
         select: { id: true, email: true },
@@ -205,15 +253,15 @@ export async function createPayment(req, res) {
         });
       }
 
-      // Notificar al proveedor por notificación + correo si tiene email
       const providerEmail =
         po.provider?.emailContacto ||
         (po.provider?.contacts && po.provider.contacts[0]?.email);
+
       if (providerEmail) {
-        // Create a notification if we have an associated user for provider (best-effort: try match by email)
         const providerUser = await prisma.user.findUnique({
           where: { email: providerEmail },
         });
+
         if (providerUser) {
           await createNotification({
             userId: providerUser.id,
@@ -232,20 +280,19 @@ export async function createPayment(req, res) {
           });
         }
 
-        // Enviar correo al proveedor
         try {
           await sendPaymentRegisteredEmail(providerEmail, payment, po);
         } catch (mailErr) {
           console.warn(
             "No se pudo enviar email al proveedor:",
-            mailErr.message || mailErr,
+            mailErr.message || mailErr
           );
         }
       }
     } catch (notifyErr) {
       console.error(
         "Error creando notificaciones / correos tras crear pago:",
-        notifyErr,
+        notifyErr
       );
     }
   } catch (error) {
@@ -300,7 +347,6 @@ export async function updatePayment(req, res) {
       },
     });
 
-    // Registrar en auditoría
     await prisma.auditLog.create({
       data: {
         actorId: userId,
@@ -360,7 +406,6 @@ export async function deletePayment(req, res) {
       where: { id: parseInt(id) },
     });
 
-    // Registrar en auditoría
     await prisma.auditLog.create({
       data: {
         actorId: userId,
@@ -459,6 +504,7 @@ export async function listPayments(req, res) {
     });
   }
 }
+
 /**
  * Obtener un pago específico
  * GET /api/payments/:id
@@ -479,6 +525,11 @@ export async function getPayment(req, res) {
             createdAt: true,
             isActive: true,
             comment: true,
+            bucket: true,
+            path: true,
+            mimeType: true,
+            sizeBytes: true,
+            version: true,
           },
         },
         decidedBy: {
@@ -519,7 +570,9 @@ export async function getPayment(req, res) {
       return res.status(404).json({ error: "Pago no encontrado" });
     }
 
-    res.json(payment);
+    const paymentWithUrls = await attachSignedUrlsToPayment(payment);
+
+    res.json(paymentWithUrls);
   } catch (error) {
     console.error("Error getPayment:", error);
     res.status(500).json({
@@ -537,7 +590,7 @@ export async function getPayment(req, res) {
 export async function listPaymentsForApproval(req, res) {
   try {
     const {
-      status = "SUBMITTED", // SUBMITTED | APPROVED | REJECTED | PAID | PENDING
+      status = "SUBMITTED",
       search = "",
       method,
       limit = 100,
@@ -575,6 +628,11 @@ export async function listPaymentsForApproval(req, res) {
               fileName: true,
               createdAt: true,
               isActive: true,
+              bucket: true,
+              path: true,
+              mimeType: true,
+              sizeBytes: true,
+              version: true,
             },
           },
           decidedBy: { select: { id: true, fullName: true, email: true } },
@@ -596,8 +654,10 @@ export async function listPaymentsForApproval(req, res) {
       prisma.payment.count({ where }),
     ]);
 
+    const paymentsWithUrls = await attachSignedUrlsToPayments(payments);
+
     res.json({
-      payments,
+      payments: paymentsWithUrls,
       pagination: {
         total,
         limit: parseInt(limit, 10),
@@ -617,13 +677,6 @@ export async function listPaymentsForApproval(req, res) {
 /**
  * Decidir un pago (aprobar/rechazar)
  * PATCH /api/payments/:id/decision
- * body: {
- *   decision: "APPROVE" | "REJECT",
- *   comment?: string,
- *   rejectionType?: "GENERAL" | "INVOICE_ERROR",
- *   invoiceErrors?: string[]
- * }
- * Acceso: ADMIN, APPROVER
  */
 export async function decidePayment(req, res) {
   try {
@@ -703,7 +756,17 @@ export async function decidePayment(req, res) {
       include: {
         evidences: {
           where: { isActive: true },
-          select: { id: true, kind: true, fileName: true, createdAt: true },
+          select: {
+            id: true,
+            kind: true,
+            fileName: true,
+            createdAt: true,
+            bucket: true,
+            path: true,
+            mimeType: true,
+            sizeBytes: true,
+            version: true,
+          },
         },
         decidedBy: { select: { id: true, fullName: true, email: true } },
         purchaseOrder: {
@@ -761,9 +824,11 @@ export async function decidePayment(req, res) {
       },
     });
 
+    const updatedWithUrls = await attachSignedUrlsToPayment(updated);
+
     res.json({
       message: decision === "APPROVE" ? "Pago aprobado" : "Pago rechazado",
-      payment: updated,
+      payment: updatedWithUrls,
     });
   } catch (error) {
     console.error("Error decidePayment:", error);
@@ -777,8 +842,6 @@ export async function decidePayment(req, res) {
 /**
  * Marcar un pago como pagado
  * PATCH /api/payments/:id/mark-paid
- * body: { note?: string }
- * Acceso: ADMIN, APPROVER
  */
 export async function markPaymentPaid(req, res) {
   try {
@@ -801,7 +864,6 @@ export async function markPaymentPaid(req, res) {
 
     if (!payment) return res.status(404).json({ error: "Pago no encontrado" });
 
-    // Solo permitir marcar como pagada si ya está APPROVED (tu regla UI)
     if (payment.status !== "APPROVED") {
       return res.status(409).json({
         error: "Solo puedes marcar como pagado un pago APPROVED",
@@ -813,13 +875,22 @@ export async function markPaymentPaid(req, res) {
       where: { id: parseInt(id) },
       data: {
         status: "PAID",
-        // si mandan nota, la guardamos en reference (opción A, sin crear columnas nuevas)
         reference: note ? String(note).trim().slice(0, 120) : payment.reference,
       },
       include: {
         evidences: {
           where: { isActive: true },
-          select: { id: true, kind: true, fileName: true, createdAt: true },
+          select: {
+            id: true,
+            kind: true,
+            fileName: true,
+            createdAt: true,
+            bucket: true,
+            path: true,
+            mimeType: true,
+            sizeBytes: true,
+            version: true,
+          },
         },
         purchaseOrder: {
           select: {
@@ -833,7 +904,6 @@ export async function markPaymentPaid(req, res) {
       },
     });
 
-    // Auditoría
     await prisma.auditLog.create({
       data: {
         actorId: userId,
@@ -860,18 +930,18 @@ export async function markPaymentPaid(req, res) {
       },
     });
 
+    const updatedWithUrls = await attachSignedUrlsToPayment(updated);
+
     return res.json({
       message: "Pago marcado como pagado",
-      payment: updated,
+      payment: updatedWithUrls,
     });
   } catch (error) {
     console.error("Error markPaymentPaid:", error);
-    return res
-      .status(500)
-      .json({
-        error: "Error al marcar pago como pagado",
-        detail: error.message,
-      });
+    return res.status(500).json({
+      error: "Error al marcar pago como pagado",
+      detail: error.message,
+    });
   }
 }
 
@@ -879,7 +949,9 @@ async function resolveProviderIdFromSession(req) {
   if (req.user?.providerId) return req.user.providerId;
   if (req.user?.provider?.id) return req.user.provider.id;
 
-  const email = String(req.user?.email || "").trim().toLowerCase();
+  const email = String(req.user?.email || "")
+    .trim()
+    .toLowerCase();
   if (!email) return null;
 
   const provider = await prisma.provider.findFirst({
@@ -902,7 +974,10 @@ export async function listMyPaymentPlans(req, res) {
   try {
     console.log("REQ.USER my-plans =>", req.user);
 
-    const providerId = req.user?.providerId ?? req.user?.provider?.id ?? null;
+    let providerId = req.user?.providerId ?? req.user?.provider?.id ?? null;
+    if (!providerId) {
+      providerId = await resolveProviderIdFromSession(req);
+    }
 
     console.log("providerId detectado =>", providerId);
 
@@ -944,7 +1019,9 @@ export async function listMyPaymentPlans(req, res) {
       ],
     });
 
-    return res.json({ payments });
+    const paymentsWithUrls = await attachSignedUrlsToPayments(payments);
+
+    return res.json({ payments: paymentsWithUrls });
   } catch (error) {
     console.error("Error listMyPaymentPlans:", error);
     return res.status(500).json({
@@ -966,7 +1043,10 @@ export async function submitPaymentForReview(req, res) {
       return res.status(400).json({ error: "ID de pago inválido" });
     }
 
-    const providerId = req.user?.providerId ?? req.user?.provider?.id ?? null;
+    let providerId = req.user?.providerId ?? req.user?.provider?.id ?? null;
+    if (!providerId) {
+      providerId = await resolveProviderIdFromSession(req);
+    }
 
     if (!providerId) {
       return res.status(400).json({
@@ -986,7 +1066,16 @@ export async function submitPaymentForReview(req, res) {
       include: {
         evidences: {
           where: { isActive: true },
-          select: { id: true, kind: true, fileName: true },
+          select: {
+            id: true,
+            kind: true,
+            fileName: true,
+            bucket: true,
+            path: true,
+            mimeType: true,
+            sizeBytes: true,
+            version: true,
+          },
         },
       },
     });
@@ -1006,10 +1095,10 @@ export async function submitPaymentForReview(req, res) {
     }
 
     const hasPdf = payment.evidences.some(
-      (e) => String(e.kind || "").toUpperCase() === "PDF",
+      (e) => String(e.kind || "").toUpperCase() === "PDF"
     );
     const hasXml = payment.evidences.some(
-      (e) => String(e.kind || "").toUpperCase() === "XML",
+      (e) => String(e.kind || "").toUpperCase() === "XML"
     );
 
     if (!hasPdf || !hasXml) {
@@ -1032,7 +1121,16 @@ export async function submitPaymentForReview(req, res) {
       include: {
         evidences: {
           where: { isActive: true },
-          select: { id: true, kind: true, fileName: true },
+          select: {
+            id: true,
+            kind: true,
+            fileName: true,
+            bucket: true,
+            path: true,
+            mimeType: true,
+            sizeBytes: true,
+            version: true,
+          },
         },
         purchaseOrder: {
           select: {
@@ -1049,9 +1147,11 @@ export async function submitPaymentForReview(req, res) {
       },
     });
 
+    const updatedWithUrls = await attachSignedUrlsToPayment(updated);
+
     return res.json({
       message: "Parcialidad enviada a revisión",
-      payment: updated,
+      payment: updatedWithUrls,
     });
   } catch (error) {
     console.error("Error submitPaymentForReview:", error);
