@@ -11,25 +11,8 @@ function safeFileName(s = "") {
     .replace(/^_+|_+$/g, "");
 }
 
-function withDownloadParam(urlString, filename) {
-  const url = new URL(urlString);
-  // Supabase Storage acepta ?download=... para forzar Content-Disposition: attachment
-  url.searchParams.set("download", filename || "archivo");
-  return url.toString();
-}
-
-async function redirectSupabaseView(res, url) {
-  // “View” = sin download param → el navegador lo abre
-  return res.redirect(url);
-}
-
-async function redirectSupabaseDownload(res, url, filename) {
-  // “Download” = con download param → Chrome baja directo
-  return res.redirect(withDownloadParam(url, filename));
-}
-
 // =======================
-// LISTADOS (igual que tenías)
+// LISTADOS
 // =======================
 export async function getProviders(req, res) {
   try {
@@ -97,7 +80,9 @@ export async function getProviders(req, res) {
     res.json(providers);
   } catch (error) {
     console.error("Error getProviders:", error);
-    res.status(500).json({ error: "Error al cargar proveedores", detail: error.message });
+    res
+      .status(500)
+      .json({ error: "Error al cargar proveedores", detail: error.message });
   }
 }
 
@@ -115,9 +100,17 @@ export async function getProviderDocuments(req, res) {
       where,
       include: {
         provider: {
-          select: { id: true, businessName: true, rfc: true, emailContacto: true, personType: true },
+          select: {
+            id: true,
+            businessName: true,
+            rfc: true,
+            emailContacto: true,
+            personType: true,
+          },
         },
-        documentType: { select: { id: true, code: true, name: true, description: true } },
+        documentType: {
+          select: { id: true, code: true, name: true, description: true },
+        },
         uploadedBy: { select: { id: true, fullName: true, email: true } },
         reviewedBy: { select: { id: true, fullName: true, email: true } },
       },
@@ -127,7 +120,9 @@ export async function getProviderDocuments(req, res) {
     res.json(documents);
   } catch (error) {
     console.error("Error getProviderDocuments:", error);
-    res.status(500).json({ error: "Error al cargar documentos", detail: error.message });
+    res
+      .status(500)
+      .json({ error: "Error al cargar documentos", detail: error.message });
   }
 }
 
@@ -148,171 +143,319 @@ export async function getProviderPurchaseOrders(req, res) {
     res.json(purchaseOrders);
   } catch (error) {
     console.error("Error getProviderPurchaseOrders:", error);
-    res.status(500).json({ error: "Error al cargar órdenes de compra", detail: error.message });
+    res.status(500).json({
+      error: "Error al cargar órdenes de compra",
+      detail: error.message,
+    });
   }
 }
 
 // =======================
-// VIEW / DOWNLOAD helpers por tipo
+// HELPERS DE ARCHIVOS
 // =======================
 async function resolvePurchaseOrderFile(order) {
-  // Regla: si hay storageKey, firmar desde bucket purchase-orders
   if (order.storageKey) {
-    const signed = await getSignedUrl("purchase-orders", order.storageKey, 60 * 10);
+    const signed = await getSignedUrl(
+      "purchase-orders",
+      order.storageKey,
+      60 * 10,
+    );
     return signed;
   }
-  // si no, usar pdfUrl si existe
+
   if (order.pdfUrl && order.pdfUrl.includes("supabase")) return order.pdfUrl;
   return null;
 }
 
 async function resolveInvoicePdfFile(order) {
   if (order.invoiceStorageKey) {
-    const signed = await getSignedUrl("invoices", order.invoiceStorageKey, 60 * 10);
+    const signed = await getSignedUrl(
+      "invoices",
+      order.invoiceStorageKey,
+      60 * 10,
+    );
     return signed;
   }
-  if (order.invoicePdfUrl && order.invoicePdfUrl.includes("supabase")) return order.invoicePdfUrl;
+
+  if (order.invoicePdfUrl && order.invoicePdfUrl.includes("supabase"))
+    return order.invoicePdfUrl;
   return null;
 }
 
 async function resolveInvoiceXmlFile(order) {
   if (order.invoiceXmlStorageKey) {
-    const signed = await getSignedUrl("invoices", order.invoiceXmlStorageKey, 60 * 10);
+    const signed = await getSignedUrl(
+      "invoices",
+      order.invoiceXmlStorageKey,
+      60 * 10,
+    );
     return signed;
   }
-  if (order.invoiceXmlUrl && order.invoiceXmlUrl.includes("supabase")) return order.invoiceXmlUrl;
+
+  if (order.invoiceXmlUrl && order.invoiceXmlUrl.includes("supabase"))
+    return order.invoiceXmlUrl;
   return null;
 }
 
+async function fetchStorageFile(url) {
+  const r = await fetch(url);
+
+  if (!r.ok) {
+    throw new Error(`Storage responded ${r.status}`);
+  }
+
+  const arrayBuffer = await r.arrayBuffer();
+  const buffer = Buffer.from(arrayBuffer);
+
+  return {
+    buffer,
+    storageContentType:
+      r.headers.get("content-type") || "application/octet-stream",
+  };
+}
+
+async function sendInlineFile(res, url, { filename, forcedContentType }) {
+  const { buffer } = await fetchStorageFile(url);
+
+  res.setHeader(
+    "Content-Type",
+    forcedContentType || "application/octet-stream",
+  );
+  res.setHeader(
+    "Content-Disposition",
+    `inline; filename="${filename || "archivo"}"`,
+  );
+  res.setHeader("Content-Length", buffer.length);
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+
+  return res.status(200).send(buffer);
+}
+
+async function sendAttachmentFile(res, url, { filename, fallbackContentType }) {
+  const { buffer, storageContentType } = await fetchStorageFile(url);
+
+  res.setHeader(
+    "Content-Type",
+    storageContentType || fallbackContentType || "application/octet-stream",
+  );
+  res.setHeader(
+    "Content-Disposition",
+    `attachment; filename="${filename || "archivo"}"`,
+  );
+  res.setHeader("Content-Length", buffer.length);
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+
+  return res.status(200).send(buffer);
+}
+
 // =======================
-// ✅ VIEW endpoints (abre en navegador)
+// VIEW endpoints
 // =======================
 export async function viewPurchaseOrder(req, res) {
   try {
     const { orderId } = req.params;
+
     const order = await prisma.purchaseOrder.findUnique({
       where: { id: parseInt(orderId) },
       include: { provider: true },
     });
-    if (!order) return res.status(404).json({ error: "Orden no encontrada" });
+
+    if (!order) {
+      return res.status(404).json({ error: "Orden no encontrada" });
+    }
 
     const url = await resolvePurchaseOrderFile(order);
-    if (url) return redirectSupabaseView(res, url);
+    if (!url) {
+      return res.status(404).json({ error: "Archivo no encontrado" });
+    }
 
-    return res.status(404).json({ error: "Archivo no encontrado" });
+    const filename = `OC_${order.number || order.id}_${safeFileName(order.provider?.businessName || "Proveedor")}.pdf`;
+
+    return await sendInlineFile(res, url, {
+      filename,
+      forcedContentType: "application/pdf",
+    });
   } catch (error) {
     console.error("Error viewPurchaseOrder:", error);
-    res.status(500).json({ error: "Error al visualizar orden", detail: error.message });
+    return res.status(500).json({
+      error: "Error al visualizar orden",
+      detail: error.message,
+    });
   }
 }
 
 export async function viewInvoice(req, res) {
   try {
     const { orderId } = req.params;
+
     const order = await prisma.purchaseOrder.findUnique({
       where: { id: parseInt(orderId) },
       include: { provider: true },
     });
-    if (!order) return res.status(404).json({ error: "Orden no encontrada" });
+
+    if (!order) {
+      return res.status(404).json({ error: "Orden no encontrada" });
+    }
 
     const url = await resolveInvoicePdfFile(order);
-    if (url) return redirectSupabaseView(res, url);
+    if (!url) {
+      return res.status(404).json({ error: "Factura no encontrada" });
+    }
 
-    return res.status(404).json({ error: "Factura no encontrada" });
+    const filename = `FAC_${order.number || order.id}_${safeFileName(order.provider?.businessName || "Proveedor")}.pdf`;
+
+    return await sendInlineFile(res, url, {
+      filename,
+      forcedContentType: "application/pdf",
+    });
   } catch (error) {
     console.error("Error viewInvoice:", error);
-    res.status(500).json({ error: "Error al visualizar factura", detail: error.message });
+    return res.status(500).json({
+      error: "Error al visualizar factura",
+      detail: error.message,
+    });
   }
 }
 
 export async function viewInvoiceXml(req, res) {
   try {
     const { orderId } = req.params;
+
     const order = await prisma.purchaseOrder.findUnique({
       where: { id: parseInt(orderId) },
       include: { provider: true },
     });
-    if (!order) return res.status(404).json({ error: "Orden no encontrada" });
+
+    if (!order) {
+      return res.status(404).json({ error: "Orden no encontrada" });
+    }
 
     const url = await resolveInvoiceXmlFile(order);
-    if (url) return redirectSupabaseView(res, url);
+    if (!url) {
+      return res.status(404).json({ error: "XML no encontrado" });
+    }
 
-    return res.status(404).json({ error: "XML no encontrado" });
+    const filename = `FAC_${order.number || order.id}_${safeFileName(order.provider?.businessName || "Proveedor")}.xml`;
+
+    return await sendInlineFile(res, url, {
+      filename,
+      forcedContentType: "application/xml; charset=utf-8",
+    });
   } catch (error) {
     console.error("Error viewInvoiceXml:", error);
-    res.status(500).json({ error: "Error al visualizar XML", detail: error.message });
+    return res.status(500).json({
+      error: "Error al visualizar XML",
+      detail: error.message,
+    });
   }
 }
 
 // =======================
-// ✅ DOWNLOAD endpoints (descarga directo)
+// DOWNLOAD endpoints
 // =======================
 export async function downloadPurchaseOrder(req, res) {
   try {
     const { orderId } = req.params;
+
     const order = await prisma.purchaseOrder.findUnique({
       where: { id: parseInt(orderId) },
       include: { provider: true },
     });
-    if (!order) return res.status(404).json({ error: "Orden no encontrada" });
+
+    if (!order) {
+      return res.status(404).json({ error: "Orden no encontrada" });
+    }
+
+    const url = await resolvePurchaseOrderFile(order);
+    if (!url) {
+      return res.status(404).json({ error: "Archivo no encontrado" });
+    }
 
     const filename = `OC_${order.number || order.id}_${safeFileName(order.provider?.businessName || "Proveedor")}.pdf`;
 
-    const url = await resolvePurchaseOrderFile(order);
-    if (url) return redirectSupabaseDownload(res, url, filename);
-
-    return res.status(404).json({ error: "Archivo no encontrado" });
+    return await sendAttachmentFile(res, url, {
+      filename,
+      fallbackContentType: "application/pdf",
+    });
   } catch (error) {
     console.error("Error downloadPurchaseOrder:", error);
-    res.status(500).json({ error: "Error al descargar orden", detail: error.message });
+    return res.status(500).json({
+      error: "Error al descargar orden",
+      detail: error.message,
+    });
   }
 }
 
 export async function downloadInvoice(req, res) {
   try {
     const { orderId } = req.params;
+
     const order = await prisma.purchaseOrder.findUnique({
       where: { id: parseInt(orderId) },
       include: { provider: true },
     });
-    if (!order) return res.status(404).json({ error: "Orden no encontrada" });
+
+    if (!order) {
+      return res.status(404).json({ error: "Orden no encontrada" });
+    }
+
+    const url = await resolveInvoicePdfFile(order);
+    if (!url) {
+      return res.status(404).json({ error: "Factura no encontrada" });
+    }
 
     const filename = `FAC_${order.number || order.id}_${safeFileName(order.provider?.businessName || "Proveedor")}.pdf`;
 
-    const url = await resolveInvoicePdfFile(order);
-    if (url) return redirectSupabaseDownload(res, url, filename);
-
-    return res.status(404).json({ error: "Factura no encontrada" });
+    return await sendAttachmentFile(res, url, {
+      filename,
+      fallbackContentType: "application/pdf",
+    });
   } catch (error) {
     console.error("Error downloadInvoice:", error);
-    res.status(500).json({ error: "Error al descargar factura", detail: error.message });
+    return res.status(500).json({
+      error: "Error al descargar factura",
+      detail: error.message,
+    });
   }
 }
 
 export async function downloadInvoiceXml(req, res) {
   try {
     const { orderId } = req.params;
+
     const order = await prisma.purchaseOrder.findUnique({
       where: { id: parseInt(orderId) },
       include: { provider: true },
     });
-    if (!order) return res.status(404).json({ error: "Orden no encontrada" });
+
+    if (!order) {
+      return res.status(404).json({ error: "Orden no encontrada" });
+    }
+
+    const url = await resolveInvoiceXmlFile(order);
+    if (!url) {
+      return res.status(404).json({ error: "XML no encontrado" });
+    }
 
     const filename = `FAC_${order.number || order.id}_${safeFileName(order.provider?.businessName || "Proveedor")}.xml`;
 
-    const url = await resolveInvoiceXmlFile(order);
-    if (url) return redirectSupabaseDownload(res, url, filename);
-
-    return res.status(404).json({ error: "XML no encontrado" });
+    return await sendAttachmentFile(res, url, {
+      filename,
+      fallbackContentType: "application/xml; charset=utf-8",
+    });
   } catch (error) {
     console.error("Error downloadInvoiceXml:", error);
-    res.status(500).json({ error: "Error al descargar XML", detail: error.message });
+    return res.status(500).json({
+      error: "Error al descargar XML",
+      detail: error.message,
+    });
   }
 }
 
 // =======================
-// ✅ RAW XML endpoint (NO REDIRECT)
-// Devuelve el XML como texto para poder renderizarlo bonito en front
+// RAW XML endpoint
 // =======================
 export async function rawInvoiceXml(req, res) {
   try {
@@ -323,13 +466,15 @@ export async function rawInvoiceXml(req, res) {
       include: { provider: true },
     });
 
-    if (!order) return res.status(404).json({ error: "Orden no encontrada" });
+    if (!order) {
+      return res.status(404).json({ error: "Orden no encontrada" });
+    }
 
-    // Reutiliza tu resolver (firma URL o usa URL guardada)
     const url = await resolveInvoiceXmlFile(order);
-    if (!url) return res.status(404).json({ error: "XML no encontrado" });
+    if (!url) {
+      return res.status(404).json({ error: "XML no encontrado" });
+    }
 
-    // ✅ Descargar desde el server (evita CORS del navegador)
     const r = await fetch(url);
     if (!r.ok) {
       return res.status(502).json({
@@ -340,7 +485,6 @@ export async function rawInvoiceXml(req, res) {
 
     const xmlText = await r.text();
 
-    // ✅ Responder como XML (sin redirect)
     res.setHeader("Content-Type", "application/xml; charset=utf-8");
     res.setHeader("Cache-Control", "no-store");
 
