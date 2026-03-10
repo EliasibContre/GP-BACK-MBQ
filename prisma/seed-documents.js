@@ -36,8 +36,6 @@ async function main() {
       requiredFor: ['FISICA', 'MORAL']
     }
   ];
-
-  console.log('Insertando tipos de documento...');
   
   for (const doc of physicaDocs) {
     await prisma.documentType.upsert({
@@ -45,10 +43,8 @@ async function main() {
       update: doc,
       create: doc
     });
-    console.log(`✓ ${doc.name}`);
   }
 
-  console.log('Seed completado');
 }
 
 main()

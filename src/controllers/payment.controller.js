@@ -210,7 +210,6 @@ export async function createPayment(req, res) {
       },
     });
 
-    console.log(`✅ Pago creado: OC ${po.number}, Monto $${amount}`);
 
     res.status(201).json({
       message: "Pago registrado correctamente",
@@ -430,7 +429,6 @@ export async function deletePayment(req, res) {
       },
     });
 
-    console.log(`🗑️ Pago eliminado: OC ${payment.purchaseOrder.number}`);
 
     res.json({ message: "Pago eliminado correctamente" });
   } catch (error) {
@@ -1015,14 +1013,12 @@ async function resolveProviderIdFromSession(req) {
 // =========================
 export async function listMyPaymentPlans(req, res) {
   try {
-    console.log("REQ.USER my-plans =>", req.user);
 
     let providerId = req.user?.providerId ?? req.user?.provider?.id ?? null;
     if (!providerId) {
       providerId = await resolveProviderIdFromSession(req);
     }
 
-    console.log("providerId detectado =>", providerId);
 
     if (!providerId) {
       return res.status(400).json({

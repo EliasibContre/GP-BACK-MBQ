@@ -9,7 +9,6 @@ export async function logAudit({
 }) {
     try {
         if (!action || !entity) return;
-        console.log("[audit] writing:", { actorId, action, entity, entityId });
 
         await prisma.auditLog.create({
             data: {

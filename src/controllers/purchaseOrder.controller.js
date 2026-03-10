@@ -435,7 +435,6 @@ export async function approvePurchaseOrder(req, res) {
           console.error("Error enviando email PO aprobado:", e.message);
         }
       } else if (providerEmail) {
-        console.log(`[DEV] PO aprobada para ${providerEmail}: ${updated.number}`);
       }
     } catch (e) {
       console.error("Error notificando/mandando email al aprobar PO:", e);
@@ -513,9 +512,6 @@ export async function rejectPurchaseOrder(req, res) {
           console.error("Error enviando email PO rechazado:", e.message);
         }
       } else if (providerEmail) {
-        console.log(
-          `[DEV] PO rechazada para ${providerEmail}: ${updated.number} - motivo: ${reason}`
-        );
       }
     } catch (e) {
       console.error("Error notificando/mandando email al rechazar PO:", e);
@@ -844,7 +840,14 @@ export async function updatePurchaseOrder(req, res) {
     const id = Number(req.params.id);
     const userId = req.user?.id;
     const userEmail = req.user?.email;
-    const { monto, fecha, observaciones } = req.body || {};
+    const {
+      monto,
+      fecha,
+      observaciones,
+      ocPdfRemoved,
+      removedInvoicePdfNames,
+      removedInvoiceXmlNames,
+    } = req.body || {};
 
     let issuedAt = null;
     if (fecha) {
@@ -858,13 +861,21 @@ export async function updatePurchaseOrder(req, res) {
       where: { emailContacto: userEmail, isActive: true, deletedAt: null },
       select: { id: true, businessName: true },
     });
-    if (!provider) return res.status(404).json({ error: "Proveedor no encontrado" });
+    if (!provider) {
+      return res.status(404).json({ error: "Proveedor no encontrado" });
+    }
 
     const po = await prisma.purchaseOrder.findUnique({
       where: { id },
-      include: { poInvoices: true },
+      include: {
+        poInvoices: {
+          orderBy: { id: "asc" },
+        },
+      },
     });
-    if (!po) return res.status(404).json({ error: "Orden no encontrada" });
+    if (!po) {
+      return res.status(404).json({ error: "Orden no encontrada" });
+    }
 
     if (po.providerId !== provider.id) {
       return res.status(403).json({ error: "No autorizado" });
@@ -878,15 +889,53 @@ export async function updatePurchaseOrder(req, res) {
     const invoicePdfFiles = req.files?.archivoFacturaPdf || [];
     const invoiceXmlFiles = req.files?.archivoFacturaXml || [];
 
-    const wantsReplaceInvoices = invoicePdfFiles.length > 0 || invoiceXmlFiles.length > 0;
+    const removeOrder = String(ocPdfRemoved || "").toLowerCase() === "true";
 
-    // si pretende reemplazar facturas, deben venir pareadas
-    if (wantsReplaceInvoices) {
-      if (invoicePdfFiles.length === 0)
+    const parseJsonArray = (value) => {
+      if (!value) return [];
+      if (Array.isArray(value)) return value.filter(Boolean).map(String);
+      try {
+        const parsed = JSON.parse(value);
+        return Array.isArray(parsed) ? parsed.filter(Boolean).map(String) : [];
+      } catch {
+        return [];
+      }
+    };
+
+    const removedPdfNames = parseJsonArray(removedInvoicePdfNames);
+    const removedXmlNames = parseJsonArray(removedInvoiceXmlNames);
+
+    const hasInvoiceRemovals =
+      removedPdfNames.length > 0 || removedXmlNames.length > 0;
+
+    const hasNewInvoiceFiles =
+      invoicePdfFiles.length > 0 || invoiceXmlFiles.length > 0;
+
+    const wantsMutateInvoices = hasInvoiceRemovals || hasNewInvoiceFiles;
+
+    const basenameNoExt = (v = "") => {
+      const raw = String(v || "").split("?")[0].split("#")[0].split("/").pop() || "";
+      return raw.replace(/\.[^.]+$/, "").trim().toUpperCase();
+    };
+
+    const nameOnly = (v = "") =>
+      String(v || "").split("?")[0].split("#")[0].split("/").pop() || "";
+
+    const removedPdfSet = new Set(
+      removedPdfNames.map((x) => basenameNoExt(x)).filter(Boolean)
+    );
+    const removedXmlSet = new Set(
+      removedXmlNames.map((x) => basenameNoExt(x)).filter(Boolean)
+    );
+
+    // Si manda nuevas facturas, deben venir pareadas
+    if (hasNewInvoiceFiles) {
+      if (invoicePdfFiles.length === 0) {
         return res.status(400).json({ error: "Debe subir al menos un PDF de factura" });
-      if (invoiceXmlFiles.length === 0)
+      }
+      if (invoiceXmlFiles.length === 0) {
         return res.status(400).json({ error: "Debe subir al menos un XML de factura" });
-
+      }
       if (invoicePdfFiles.length !== invoiceXmlFiles.length) {
         return res.status(400).json({
           error:
@@ -896,7 +945,7 @@ export async function updatePurchaseOrder(req, res) {
         });
       }
 
-      // ✅ NUEVO: Validar CFDI antes de subir (solo si viene reemplazo)
+      // Validar XMLs nuevos
       const seenUuids = new Set();
       for (let i = 0; i < invoiceXmlFiles.length; i++) {
         const xmlF = invoiceXmlFiles[i];
@@ -915,8 +964,7 @@ export async function updatePurchaseOrder(req, res) {
           const u = String(v.data.uuid).toUpperCase();
           if (seenUuids.has(u)) {
             return res.status(400).json({
-              error:
-                "Factura XML duplicada (UUID repetido en el mismo envío)",
+              error: "Factura XML duplicada (UUID repetido en el mismo envío)",
               uuid: u,
               file: xmlF.originalname,
               index: i,
@@ -927,14 +975,21 @@ export async function updatePurchaseOrder(req, res) {
       }
     }
 
+    // La orden no puede quedarse sin PDF
+    if (removeOrder && !orderFile) {
+      return res.status(400).json({
+        error: "Si eliminas el PDF actual de la orden, debes subir uno nuevo",
+      });
+    }
+
     const ts = Date.now();
 
-    // Subidas nuevas (para rollback si algo falla)
+    // Subidas nuevas para rollback
     const uploadedKeys = []; // { bucket, key }
     let newOrder = null; // { url, path }
-    const newInvoices = []; // { pdfUrl,pdfStorageKey, xmlUrl,xmlStorageKey }
+    const newInvoices = []; // [{ pdfUrl, pdfStorageKey, xmlUrl, xmlStorageKey }]
 
-    // 1) Si viene nuevo PDF de orden, subirlo
+    // 1) Subir nuevo PDF de orden si viene
     if (orderFile) {
       const orderFilename = `PO_${po.number}_${ts}.pdf`;
       const orderPath = `${provider.id}/${orderFilename}`;
@@ -957,8 +1012,8 @@ export async function updatePurchaseOrder(req, res) {
       }
     }
 
-    // 2) Si viene reemplazo de facturas, subir todas (PDF+XML) con rollback
-    if (wantsReplaceInvoices) {
+    // 2) Subir nuevas facturas si vienen
+    if (hasNewInvoiceFiles) {
       try {
         for (let i = 0; i < invoicePdfFiles.length; i++) {
           const pdfF = invoicePdfFiles[i];
@@ -996,7 +1051,6 @@ export async function updatePurchaseOrder(req, res) {
       } catch (e) {
         console.error("Error subiendo nuevas facturas a Supabase:", e.message || e);
 
-        // rollback de lo subido en este update
         for (const k of uploadedKeys.reverse()) {
           try {
             await deleteFromSupabase(k.bucket, k.key);
@@ -1017,47 +1071,97 @@ export async function updatePurchaseOrder(req, res) {
       }
     }
 
-    // 3) Guardar cambios en BD
-    const oldOrderKey = po.storageKey;
+    // 3) Determinar qué invoices se quedan, cuáles se eliminan y cuáles se agregan
+    const keptInvoices = [];
+    const removedInvoiceRecords = [];
 
-    // keys viejas de invoices para borrarlas después (si se reemplazan)
-    const oldInvoiceKeys = [];
-    if (po.invoiceStorageKey) oldInvoiceKeys.push(po.invoiceStorageKey);
-    if (po.invoiceXmlStorageKey) oldInvoiceKeys.push(po.invoiceXmlStorageKey);
     for (const inv of po.poInvoices || []) {
-      if (inv.pdfStorageKey) oldInvoiceKeys.push(inv.pdfStorageKey);
-      if (inv.xmlStorageKey) oldInvoiceKeys.push(inv.xmlStorageKey);
+      const pdfBase = basenameNoExt(inv.pdfStorageKey || inv.pdfUrl || "");
+      const xmlBase = basenameNoExt(inv.xmlStorageKey || inv.xmlUrl || "");
+
+      const shouldRemove =
+        removedPdfSet.has(pdfBase) ||
+        removedXmlSet.has(xmlBase) ||
+        removedPdfSet.has(basenameNoExt(nameOnly(inv.pdfStorageKey || inv.pdfUrl || ""))) ||
+        removedXmlSet.has(basenameNoExt(nameOnly(inv.xmlStorageKey || inv.xmlUrl || "")));
+
+      if (shouldRemove) {
+        removedInvoiceRecords.push(inv);
+      } else {
+        keptInvoices.push(inv);
+      }
     }
 
+    const finalInvoices = [
+      ...keptInvoices.map((inv) => ({
+        pdfUrl: inv.pdfUrl,
+        pdfStorageKey: inv.pdfStorageKey,
+        xmlUrl: inv.xmlUrl,
+        xmlStorageKey: inv.xmlStorageKey,
+      })),
+      ...newInvoices,
+    ];
+
+    if (wantsMutateInvoices && finalInvoices.length === 0) {
+      return res.status(400).json({
+        error:
+          "La orden debe conservar al menos una factura PDF/XML después de los cambios",
+      });
+    }
+
+    const oldOrderKey = po.storageKey;
+    const invoiceKeysToDelete = [];
+
+    for (const inv of removedInvoiceRecords) {
+      if (inv.pdfStorageKey) invoiceKeysToDelete.push(inv.pdfStorageKey);
+      if (inv.xmlStorageKey) invoiceKeysToDelete.push(inv.xmlStorageKey);
+    }
+
+    const uniq = (arr) => [...new Set((arr || []).filter(Boolean))];
+
+    // 4) Guardar cambios en BD
     const updated = await prisma.$transaction(async (tx) => {
       const data = {};
-      if (monto != null && String(monto).trim() !== "") data.total = String(monto);
-      if (issuedAt) data.issuedAt = issuedAt;
-      if (observaciones !== undefined) data.obervations = observaciones || null;
+
+      if (monto != null && String(monto).trim() !== "") {
+        data.total = String(monto);
+      }
+      if (issuedAt) {
+        data.issuedAt = issuedAt;
+      }
+      if (observaciones !== undefined) {
+        data.obervations = observaciones || null;
+      }
+
       if (newOrder) {
         data.pdfUrl = newOrder.url;
         data.storageKey = newOrder.path;
       }
 
-      // si reemplaza facturas: actualizar legacy + reemplazar hijas
-      if (wantsReplaceInvoices) {
-        const firstInv = newInvoices[0];
+      if (wantsMutateInvoices) {
+        const firstInv = finalInvoices[0] || null;
+
         data.invoicePdfUrl = firstInv?.pdfUrl || null;
         data.invoiceStorageKey = firstInv?.pdfStorageKey || null;
         data.invoiceXmlUrl = firstInv?.xmlUrl || null;
         data.invoiceXmlStorageKey = firstInv?.xmlStorageKey || null;
-        data.invoiceUploadedAt = new Date();
+        data.invoiceUploadedAt = firstInv ? new Date() : null;
 
-        await tx.purchaseOrderInvoice.deleteMany({ where: { purchaseOrderId: id } });
-        await tx.purchaseOrderInvoice.createMany({
-          data: newInvoices.map((inv) => ({
-            purchaseOrderId: id,
-            pdfUrl: inv.pdfUrl,
-            pdfStorageKey: inv.pdfStorageKey,
-            xmlUrl: inv.xmlUrl,
-            xmlStorageKey: inv.xmlStorageKey,
-          })),
+        await tx.purchaseOrderInvoice.deleteMany({
+          where: { purchaseOrderId: id },
         });
+
+        if (finalInvoices.length > 0) {
+          await tx.purchaseOrderInvoice.createMany({
+            data: finalInvoices.map((inv) => ({
+              purchaseOrderId: id,
+              pdfUrl: inv.pdfUrl,
+              pdfStorageKey: inv.pdfStorageKey,
+              xmlUrl: inv.xmlUrl,
+              xmlStorageKey: inv.xmlStorageKey,
+            })),
+          });
+        }
       }
 
       const poUp = await tx.purchaseOrder.update({
@@ -1081,12 +1185,17 @@ export async function updatePurchaseOrder(req, res) {
               fields: {
                 monto: monto != null ? String(monto) : undefined,
                 fecha: fecha || undefined,
-                observaciones: observaciones !== undefined ? observaciones || null : undefined,
+                observaciones:
+                  observaciones !== undefined ? observaciones || null : undefined,
               },
               orderFileReplaced: Boolean(newOrder),
-              invoicesReplaced: Boolean(wantsReplaceInvoices),
+              orderMarkedRemoved: removeOrder,
+              removedInvoicePdfNames: removedPdfNames,
+              removedInvoiceXmlNames: removedXmlNames,
+              invoicesAddedCount: newInvoices.length,
+              invoicesRemovedCount: removedInvoiceRecords.length,
+              invoicesFinalCount: finalInvoices.length,
               newOrderKey: newOrder?.path || null,
-              newInvoicesCount: newInvoices.length || 0,
             },
           },
         },
@@ -1095,7 +1204,7 @@ export async function updatePurchaseOrder(req, res) {
       return poUp;
     });
 
-    // 4) Limpieza best-effort de archivos viejos (si hubo reemplazo)
+    // 5) Limpieza best-effort en storage
     if (newOrder && oldOrderKey) {
       try {
         await deleteFromSupabase("purchase-orders", oldOrderKey);
@@ -1104,18 +1213,18 @@ export async function updatePurchaseOrder(req, res) {
       }
     }
 
-    if (wantsReplaceInvoices) {
-      const uniq = (arr) => [...new Set(arr.filter(Boolean))];
-      for (const key of uniq(oldInvoiceKeys)) {
-        try {
-          await deleteFromSupabase("invoices", key);
-        } catch (e) {
-          console.warn("No se pudo borrar factura anterior:", key, e.message || e);
-        }
+    for (const key of uniq(invoiceKeysToDelete)) {
+      try {
+        await deleteFromSupabase("invoices", key);
+      } catch (e) {
+        console.warn("No se pudo borrar factura anterior:", key, e.message || e);
       }
     }
 
-    return res.json({ message: "Orden actualizada correctamente", data: updated });
+    return res.json({
+      message: "Orden actualizada correctamente",
+      data: updated,
+    });
   } catch (error) {
     console.error("Error updatePurchaseOrder:", error);
     return res.status(500).json({ error: "Error al actualizar la orden" });

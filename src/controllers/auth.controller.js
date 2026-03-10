@@ -302,7 +302,6 @@ export async function requestPasswordResetCtrl(req, res) {
   const result = await requestPasswordReset(email);
 
   if (process.env.TEST_MODE === "true" || process.env.MAILER_DISABLED === "true") {
-    console.log(`[DEV] Password reset requested for ${email}`);
   }
 
   return res.status(200).json(result);

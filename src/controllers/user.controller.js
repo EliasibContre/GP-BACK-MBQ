@@ -101,12 +101,10 @@ export async function createUser(req, res, next) {
       try {
         await sendTemporaryPasswordEmail(email, tempPassword);
         emailSent = true;
-        console.log(`✅ Contraseña temporal enviada a ${email}`);
       } catch (e) {
         console.error("Error enviando contraseña temporal:", e.message);
       }
     } else {
-      console.log(`[DEV] Contraseña temporal para ${email}: ${tempPassword}`);
     }
 
     // ✅ devuelve roles como strings también

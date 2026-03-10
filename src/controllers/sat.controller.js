@@ -178,7 +178,6 @@ export async function importSatBlacklist(req, res) {
                 upsert: true, // ✅ reemplaza, no acumula
             });
 
-            console.log("[SAT IMPORT] Stored latest file:", { bucket, storagePath });
         } catch (e) {
             console.warn("[SAT IMPORT] Storage upload failed:", e?.message || e);
         }

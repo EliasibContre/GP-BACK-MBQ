@@ -31,9 +31,6 @@ if (!supabaseServiceKey)throw new Error("❌ Faltan SUPABASE_SERVICE_KEY en .env
 if (process.env.NODE_ENV !== "production") {
   // Validación: JWT debe tener 3 partes
   const jwtParts = supabaseServiceKey.split(".");
-  console.log("✅ Supabase URL:", supabaseUrl);
-  console.log("✅ Service Key length:", supabaseServiceKey.length);
-  console.log("✅ JWT parts:", jwtParts.length);
 } else {
   // Validación silenciosa en prod (sin log)
   const jwtParts = supabaseServiceKey.split(".");

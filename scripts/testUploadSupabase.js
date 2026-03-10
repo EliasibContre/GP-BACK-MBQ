@@ -16,12 +16,10 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
 async function run() {
   try {
-    console.log('Listando buckets...');
     const { data: buckets, error: listError } = await supabase.storage.listBuckets();
     if (listError) {
       console.error('Error listando buckets:', listError.message || listError);
     } else {
-      console.log('Buckets:', buckets.map(b => b.name).join(', '));
     }
 
     const bucket = 'provider-documents';
@@ -29,7 +27,6 @@ async function run() {
     const content = 'Prueba de upload desde script local: ' + new Date().toISOString();
     const buffer = Buffer.from(content);
 
-    console.log(`Subiendo a bucket=${bucket} path=${path} bytes=${buffer.length}`);
     const { data, error } = await supabase.storage
       .from(bucket)
       .upload(path, buffer, { contentType: 'text/plain' });
@@ -39,10 +36,8 @@ async function run() {
       process.exit(1);
     }
 
-    console.log('Upload OK, data:', data);
 
     const { data: urlData } = supabase.storage.from(bucket).getPublicUrl(path);
-    console.log('Public URL:', urlData.publicUrl);
   } catch (e) {
     console.error('Error ejecutando testUploadSupabase:', e.message || e);
     process.exit(1);

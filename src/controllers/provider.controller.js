@@ -125,7 +125,6 @@ export async function getProviderByRfcStrict(req, res, next) {
 }
 
 export async function createProvider(req, res, next) {
-  console.log(' BODY recibido en createProvider:', JSON.stringify(req.body, null, 2));
   try {
     const {
       businessName, rfc, emailContacto, telefono,
@@ -166,7 +165,6 @@ export async function createProvider(req, res, next) {
       let providerRole = await tx.role.findFirst({ where: { name: { in: ['PROVIDER', 'provider', 'Provider'] } } });
       if (!providerRole) {
         providerRole = await tx.role.create({ data: { name: 'PROVIDER' } });
-        console.log('[createProvider] Rol PROVIDER creado con id:', providerRole.id);
       }
       const existingUserProviderRole = await tx.userRole.findFirst({ where: { userId: user.id, roleId: providerRole.id } });
       if (!existingUserProviderRole) {

@@ -72,7 +72,6 @@ export async function createAccessRequest(data) {
   if (String(process.env.MAILER_DISABLED || 'false') !== 'true') {
     try { await sendAccessRequestAckEmail(email, kind); } catch (_) { /* ignore */ }
   } else {
-    console.log(`[DEV] Solicitud de acceso creada #${record.id} para ${email}`);
   }
 
   return { message: 'Solicitud recibida. Te avisaremos cuando sea revisada.' };
@@ -141,7 +140,6 @@ export async function decideAccessRequest({ id, decision, approverUserId, roles 
     if (String(process.env.MAILER_DISABLED || 'false') !== 'true') {
       try { await sendAccessRequestRejectedEmail(request.email, notes); } catch (e) { console.error('Error email rechazo:', e.message); }
     } else {
-      console.log(`[DEV] Rechazo para ${request.email} con motivo: ${notes}`);
     }
     await prisma.auditLog.create({ data: { actorId: approverUserId, action: 'ACCESS_REQUEST_REJECTED', entity: 'AccessRequest', entityId: request.id, meta: { notes } } });
     return { message: 'Solicitud rechazada' };
@@ -163,7 +161,6 @@ export async function decideAccessRequest({ id, decision, approverUserId, roles 
 
   // Verificar que roles existen
   const roleRecords = await prisma.role.findMany({ where: { name: { in: userRoles } } });
-  console.log('[DEBUG] userRoles:', userRoles, 'roleRecords:', roleRecords.map(r => r.name));
   if (roleRecords.length !== userRoles.length) { 
     const err = new Error(`Rol inválido: esperados ${userRoles.join(', ')}, encontrados ${roleRecords.map(r => r.name).join(', ')}`); 
     err.status = 400; 
@@ -193,7 +190,6 @@ export async function decideAccessRequest({ id, decision, approverUserId, roles 
   if (String(process.env.MAILER_DISABLED || 'false') !== 'true') {
     try { await sendTemporaryPasswordEmail(request.email, tempPassword); } catch (e) { console.error('Error email temp password:', e.message); }
   } else {
-    console.log(`[DEV] Temp password para ${request.email}: ${tempPassword}`);
   }
 
   await prisma.auditLog.create({ data: { actorId: approverUserId, action: 'ACCESS_REQUEST_APPROVED', entity: 'AccessRequest', entityId: request.id, meta: { roles: userRoles, department: userDepartment } } });

@@ -16,7 +16,6 @@ export async function requireAuth(req, res, next) {
     const claims = verifyJwt(token); // ejemplo esperado: { id, email, role? / roleId? / roles? }
 
     // DEBUG opcional
-    // console.log('JWT claims:', claims);
 
     // Si NO hay role/roles, cargar desde BD (sin tocar la lógica de token)
     if (!claims.role && !claims.roleId && !claims.roles && claims.id) {

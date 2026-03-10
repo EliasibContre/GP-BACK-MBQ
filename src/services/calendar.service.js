@@ -71,9 +71,7 @@ export async function generateCalendarEvents({ from, to, providerId, onlyApprove
   });
 
   if (providerId || onlyApproved) {
-    console.log(`📅 Calendar query: providerId=${providerId}, onlyApproved=${onlyApproved}, found=${purchaseOrders.length} POs`);
     purchaseOrders.forEach(po => {
-      console.log(`  - PO ${po.id}: ${po.number}, status=${po.status}, provider=${po.provider?.businessName}`);
     });
   }
 

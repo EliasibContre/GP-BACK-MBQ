@@ -68,7 +68,6 @@ async function attachSignedUrlsToDocuments(providerDocuments) {
 export async function getDocumentTypes(req, res) {
   try {
     const { personType } = req.query;
-    console.log("GET /api/documents/types personType:", personType);
 
     if (!personType || !["FISICA", "MORAL"].includes(personType)) {
       console.error(" Tipo de persona inválido:", personType);
@@ -80,7 +79,6 @@ export async function getDocumentTypes(req, res) {
       orderBy: { name: "asc" },
     });
 
-    console.log("Documentos encontrados:", documentTypes.length);
     return res.json(documentTypes);
   } catch (error) {
     console.error("Error al obtener tipos de documento:", error);
@@ -289,11 +287,6 @@ export async function uploadDocuments(req, res) {
 
         uploads.push({ docTypeCode, storageKey, fileName: file.originalname });
 
-        console.log("Uploaded to Supabase:", {
-          bucket: DOCS_BUCKET,
-          storageKey,
-          upsert: true,
-        });
       } catch (e) {
         console.error("Error subiendo documento a Supabase (fuera tx) tipo:", docTypeCode, e);
 

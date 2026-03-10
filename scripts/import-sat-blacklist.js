@@ -67,11 +67,8 @@ function processRow(row, rowIndex) {
   try {
     // Debug: Imprimir las claves de la primera fila para ver los nombres reales
     if (rowIndex === 2) {
-      console.log('\n📋 Columnas detectadas en el archivo:');
       Object.keys(row).forEach((key, index) => {
-        console.log(`   [${index}] ${key}`);
       });
-      console.log('\n');
     }
     
     // Obtener las claves del objeto (columnas)
@@ -153,21 +150,15 @@ function processRow(row, rowIndex) {
  * Importa el archivo Excel a la base de datos
  */
 async function importSatBlacklist() {
-  console.log('╔════════════════════════════════════════════════════════════╗');
-  console.log('║  IMPORTACIÓN DE LISTA NEGRA DEL SAT                       ║');
-  console.log('╚════════════════════════════════════════════════════════════╝\n');
   
   // Verificar que el archivo existe
   if (!fs.existsSync(EXCEL_FILE_PATH)) {
     console.error(`❌ Error: No se encontró el archivo: ${EXCEL_FILE_PATH}`);
-    console.log('\nUso: node scripts/import-sat-blacklist.js [ruta-al-excel.xlsx]');
     process.exit(1);
   }
   
-  console.log(`📂 Archivo: ${path.resolve(EXCEL_FILE_PATH)}`);
   
   // Leer el archivo Excel/CSV
-  console.log('📖 Leyendo archivo...');
   const workbook = xlsx.readFile(EXCEL_FILE_PATH);
   const sheetName = workbook.SheetNames[0];
   const worksheet = workbook.Sheets[sheetName];
@@ -179,10 +170,8 @@ async function importSatBlacklist() {
     raw: false
   });
   
-  console.log(`✅ ${rawData.length} filas encontradas en la hoja "${sheetName}"\n`);
   
   // Procesar filas
-  console.log('⚙️  Procesando datos...');
   const records = [];
   const errors = [];
   
@@ -195,9 +184,7 @@ async function importSatBlacklist() {
     }
   }
   
-  console.log(`✅ ${records.length} registros válidos`);
   if (errors.length > 0) {
-    console.log(`⚠️  ${errors.length} filas con errores: ${errors.slice(0, 10).join(', ')}${errors.length > 10 ? '...' : ''}`);
   }
   
   if (records.length === 0) {
@@ -215,20 +202,14 @@ async function importSatBlacklist() {
   });
   
   if (existingImport) {
-    console.log('\n⚠️  ADVERTENCIA: Este archivo ya fue importado anteriormente:');
-    console.log(`   Fecha: ${existingImport.createdAt.toLocaleString()}`);
-    console.log(`   Registros: ${existingImport.rows}`);
-    console.log('\n¿Desea continuar de todas formas? (Los RFC duplicados serán omitidos)');
     
     // En ambiente no interactivo, cancelar
     if (!process.stdin.isTTY) {
-      console.log('❌ Importación cancelada (archivo duplicado)');
       process.exit(0);
     }
   }
   
   // Insertar en lotes
-  console.log('\n💾 Insertando en base de datos...');
   let inserted = 0;
   let skipped = 0;
   
@@ -266,7 +247,6 @@ async function importSatBlacklist() {
     }
   }
   
-  console.log('\n');
   
   // Registrar la importación
   if (ADMIN_USER_ID) {
@@ -283,17 +263,7 @@ async function importSatBlacklist() {
       console.warn('⚠️  No se pudo registrar la importación en SatImport:', e.message);
     }
   } else {
-    console.log('ℹ️  Importación no registrada (sin usuario admin configurado)');
   }
-  
-  // Resumen final
-  console.log('╔════════════════════════════════════════════════════════════╗');
-  console.log('║  RESUMEN DE IMPORTACIÓN                                    ║');
-  console.log('╠════════════════════════════════════════════════════════════╣');
-  console.log(`║  ✅ Registros insertados:    ${inserted.toString().padEnd(30)} ║`);
-  console.log(`║  ⏭️  Registros duplicados:    ${skipped.toString().padEnd(30)} ║`);
-  console.log(`║  ⚠️  Filas con errores:       ${errors.length.toString().padEnd(30)} ║`);
-  console.log('╚════════════════════════════════════════════════════════════╝\n');
   
   // Estadísticas por situación
   const stats = await prisma.satBlacklist.groupBy({
@@ -301,12 +271,8 @@ async function importSatBlacklist() {
     _count: true
   });
   
-  console.log('📊 Distribución por situación:');
   stats.forEach(stat => {
-    console.log(`   ${stat.situation}: ${stat._count}`);
   });
-  
-  console.log('\n✨ Importación completada exitosamente\n');
 }
 
 // Ejecutar
