@@ -1,3 +1,4 @@
+// src/controllers/paymentEvidence.controller.js
 import crypto from "crypto";
 import { prisma } from "../config/prisma.js";
 import { supabase } from "../config/supabase.js";
@@ -44,6 +45,21 @@ export async function uploadPaymentEvidence(req, res) {
     if (!file) return res.status(400).json({ message: "Archivo requerido" });
 
     await ensurePaymentExists(paymentId);
+
+    const payment = await prisma.payment.findUnique({
+        where: { id: paymentId },
+        include: {
+            purchaseOrder: {
+                select: { providerId: true }
+            }
+        }
+    });
+
+    if (req.user?.providerId && payment.purchaseOrder.providerId !== req.user.providerId) {
+        return res.status(403).json({
+            message: "No puedes subir evidencia a este pago"
+        });
+    }
 
     const fileName = safeFileName(file.originalname);
     const mimeType = file.mimetype;

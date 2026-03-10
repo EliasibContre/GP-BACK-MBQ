@@ -290,6 +290,7 @@ model Payment {
   id              Int               @id @default(autoincrement())
   amount          Decimal           @db.Decimal(14, 2)
   paidAt          DateTime
+  closeAt         DateTime?
   method          PaymentMethod     @default(TRANSFER)
   reference       String?
   createdAt       DateTime          @default(now())

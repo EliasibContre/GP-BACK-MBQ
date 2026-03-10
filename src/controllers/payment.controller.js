@@ -10,8 +10,17 @@ import { logAudit } from "../utils/audit.js";
  */
 export async function createPayment(req, res) {
   try {
-    const { purchaseOrderId, amount, paidAt, method, reference, isScheduled, installmentNo,
-      installmentOf } = req.body;
+    const {
+      purchaseOrderId,
+      amount,
+      paidAt,
+      closeAt,
+      method,
+      reference,
+      isScheduled,
+      installmentNo,
+      installmentOf
+    } = req.body;
     const userId = req.user?.id;
     const roles = (req.user && req.user.roles) || [];
     const isProviderRole = roles.some(r => String(r.name).toUpperCase() === 'PROVIDER');
@@ -74,6 +83,7 @@ export async function createPayment(req, res) {
         purchaseOrderId: parseInt(purchaseOrderId),
         amount: parseFloat(amount),
         paidAt: new Date(paidAt),
+        closeAt: closeAt ? new Date(closeAt) : null,
         method: method ?? null,
         reference: reference ?? null,
         createdById: userId ?? null,
@@ -104,6 +114,7 @@ export async function createPayment(req, res) {
         meta: {
           purchaseOrderId: parseInt(purchaseOrderId),
           amount: parseFloat(amount),
+          closeAt: closeAt ?? null,
           method: method ?? null,
           reference: reference ?? null,
           isScheduled: Boolean(isScheduled),
@@ -122,6 +133,7 @@ export async function createPayment(req, res) {
       meta: {
         purchaseOrderId: parseInt(purchaseOrderId),
         amount: parseFloat(amount),
+        closeAt: closeAt ?? null,
         method: method ?? null,
         reference: reference ?? null,
         providerName: po.provider.businessName,
@@ -798,20 +810,32 @@ export async function markPaymentPaid(req, res) {
   }
 }
 
+async function resolveProviderIdFromSession(req) {
+  if (req.user?.providerId) return req.user.providerId;
+  if (req.user?.provider?.id) return req.user.provider.id;
+
+  const email = String(req.user?.email || "").trim().toLowerCase();
+  if (!email) return null;
+
+  const provider = await prisma.provider.findFirst({
+    where: {
+      emailContacto: email,
+      isActive: true,
+      deletedAt: null,
+    },
+    select: { id: true },
+  });
+
+  return provider?.id ?? null;
+}
+
 // =========================
 // PROVIDER: Mis parcialidades
 // GET /api/payments/my-plans
 // =========================
 export async function listMyPaymentPlans(req, res) {
   try {
-    console.log("REQ.USER my-plans =>", req.user);
-
-    const providerId =
-      req.user?.providerId ??
-      req.user?.provider?.id ??
-      null;
-
-    console.log("providerId detectado =>", providerId);
+    const providerId = await resolveProviderIdFromSession(req);
 
     if (!providerId) {
       return res.status(400).json({
@@ -828,8 +852,21 @@ export async function listMyPaymentPlans(req, res) {
         },
       },
       include: {
-        evidences: true,
-        purchaseOrder: true,
+        evidences: {
+          where: { isActive: true },
+          orderBy: [{ kind: "asc" }, { version: "desc" }, { createdAt: "desc" }],
+        },
+        purchaseOrder: {
+          include: {
+            provider: {
+              select: {
+                id: true,
+                businessName: true,
+                rfc: true,
+              },
+            },
+          },
+        },
       },
       orderBy: [
         { purchaseOrderId: "asc" },
@@ -838,11 +875,9 @@ export async function listMyPaymentPlans(req, res) {
       ],
     });
 
-    console.log("payments encontradas =>", payments.length);
-
     return res.json({ payments });
   } catch (error) {
-    console.error("Error listMyPaymentPlans FULL =>", error);
+    console.error("Error listMyPaymentPlans:", error);
     return res.status(500).json({
       error: "Error al listar parcialidades del proveedor",
       detail: error.message,
@@ -862,10 +897,7 @@ export async function submitPaymentForReview(req, res) {
       return res.status(400).json({ error: "ID de pago inválido" });
     }
 
-    const providerId =
-      req.user?.providerId ??
-      req.user?.provider?.id ??
-      null;
+    const providerId = await resolveProviderIdFromSession(req);
 
     if (!providerId) {
       return res.status(400).json({
