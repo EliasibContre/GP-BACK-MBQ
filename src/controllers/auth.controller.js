@@ -15,10 +15,8 @@ import { verifyJwt, signJwt } from "../utils/jwt.js";
 const ROLE_MAP = {
   ADMIN: "ADMIN",
   ADMINISTRADOR: "ADMIN",
-
   APPROVER: "APPROVER",
   APROBADOR: "APPROVER",
-
   PROVIDER: "PROVIDER",
   PROVEEDOR: "PROVIDER",
 };
@@ -28,9 +26,8 @@ function normalizeRole(input) {
   return ROLE_MAP[key] || null;
 }
 
-// Normaliza roles del body (string o array) => array de roles canónicos
 function normalizeRoles(inputRoles) {
-  if (!inputRoles) return [];
+  if (!inputRoles) return { unique: [], invalid: [] };
 
   const arr = Array.isArray(inputRoles) ? inputRoles : [inputRoles];
 
@@ -63,13 +60,23 @@ function cookieOptions() {
 }
 
 function buildSessionFromClaims(claims) {
-  const iat = Number(claims.iat || 0);
-  const exp = Number(claims.exp || 0);
+  const iat = Number(claims?.iat || 0);
+  const exp = Number(claims?.exp || 0);
+
   return {
-    issuedAt: new Date(iat * 1000).toISOString(),
-    expiresAt: new Date(exp * 1000).toISOString(),
-    ttlSeconds: Math.max(0, exp - iat),
+    issuedAt: iat ? new Date(iat * 1000).toISOString() : null,
+    expiresAt: exp ? new Date(exp * 1000).toISOString() : null,
+    ttlSeconds: iat && exp ? Math.max(0, exp - iat) : 0,
   };
+}
+
+function getErrorStatus(err, fallback = 500) {
+  const status = Number(err?.status);
+  return Number.isInteger(status) && status >= 100 ? status : fallback;
+}
+
+function getErrorMessage(err, fallback = "Error del servidor") {
+  return err?.message || fallback;
 }
 
 // ✅ REGISTRO
@@ -111,18 +118,19 @@ export async function registerCtrl(req, res) {
     return res.status(201).json({ message: "Usuario creado", user });
   } catch (err) {
     console.error("registerCtrl error:", err);
-    return res.status(500).json({ message: err.message || "Error del servidor" });
+    return res
+      .status(getErrorStatus(err))
+      .json({ message: getErrorMessage(err, "Error del servidor") });
   }
 }
 
-// ✅ Paso 1: credenciales (FIX)
+// ✅ Paso 1: credenciales
 export async function loginStartCtrl(req, res) {
   const { email, password } = req.body;
 
   try {
     const result = await startLogin({ email, password });
 
-    // ✅ AUDIT: start ok
     await logAudit(req, {
       actorId: result?.user?.id ?? null,
       action: "AUTH_LOGIN_START_OK",
@@ -131,7 +139,6 @@ export async function loginStartCtrl(req, res) {
       meta: { email },
     });
 
-    // Si estás en modo dev/test, el service puede regresar code y aquí lo exponemos
     const dev = String(process.env.MAILER_DISABLED || "false") === "true";
     const test = String(process.env.TEST_MODE || "false") === "true";
     const force = String(process.env.FORCE_RETURN_CODE || "false") === "true";
@@ -144,7 +151,6 @@ export async function loginStartCtrl(req, res) {
   } catch (err) {
     console.error("loginStart error:", err);
 
-    // ✅ AUDIT: start fail
     await logAudit(req, {
       actorId: null,
       action: "AUTH_LOGIN_START_FAIL",
@@ -153,21 +159,13 @@ export async function loginStartCtrl(req, res) {
       meta: { email, reason: err?.message || "UNKNOWN" },
     });
 
-    // 👇 Si estás en dev/test y aun así tronó, no tumbes el login con 500
-    const dev = String(process.env.MAILER_DISABLED || "false") === "true";
-    const test = String(process.env.TEST_MODE || "false") === "true";
-    if (dev || test) {
-      return res.status(200).json({
-        message:
-          "Modo dev/test: se intentó generar el código. Revisa logs si no llegó code.",
-      });
-    }
-
-    return res.status(500).json({ message: err.message || "Error del servidor" });
+    return res
+      .status(getErrorStatus(err))
+      .json({ message: getErrorMessage(err, "Error del servidor") });
   }
 }
 
-// Paso 2: verifica código
+// ✅ Paso 2: verifica código
 export async function loginVerifyCtrl(req, res) {
   const { email, code } = req.body;
 
@@ -201,123 +199,169 @@ export async function loginVerifyCtrl(req, res) {
       meta: { email, reason: err?.message || "INVALID_OR_EXPIRED_CODE" },
     });
 
-    return res.status(401).json({ message: err.message || "Código inválido" });
+    return res
+      .status(getErrorStatus(err, 401))
+      .json({ message: getErrorMessage(err, "Código inválido") });
   }
 }
 
 export async function resendCodeCtrl(req, res) {
   const { email } = req.body;
-  await resendLoginCode(email);
 
-  await logAudit(req, {
-    actorId: null,
-    action: "AUTH_RESEND_CODE",
-    entity: "AUTH",
-    entityId: null,
-    meta: { email },
-  });
+  try {
+    const result = await resendLoginCode(email);
 
-  return res.json({ message: "Código reenviado" });
+    await logAudit(req, {
+      actorId: null,
+      action: "AUTH_RESEND_CODE",
+      entity: "AUTH",
+      entityId: null,
+      meta: { email },
+    });
+
+    return res.status(200).json(result);
+  } catch (err) {
+    return res
+      .status(getErrorStatus(err))
+      .json({ message: getErrorMessage(err, "No se pudo reenviar el código") });
+  }
 }
 
-// Perfil
+// ✅ Perfil
 export async function meCtrl(req, res) {
-  const { id, email, fullName, roles, mustChangePassword, iat, exp } = req.user || {};
-  const session = buildSessionFromClaims({ iat, exp });
+  try {
+    if (!req.user) {
+      return res.status(401).json({ message: "No autenticado" });
+    }
 
-  return res.status(200).json({
-    user: { id, email, fullName, roles, mustChangePassword },
-    session,
-  });
+    const { id, email, fullName, roles, mustChangePassword, iat, exp } = req.user;
+    const session = buildSessionFromClaims({ iat, exp });
+
+    return res.status(200).json({
+      user: { id, email, fullName, roles, mustChangePassword },
+      session,
+    });
+  } catch (err) {
+    return res
+      .status(getErrorStatus(err))
+      .json({ message: getErrorMessage(err, "No se pudo obtener la sesión") });
+  }
 }
 
 export async function logoutCtrl(req, res) {
-  res.clearCookie(COOKIE_NAME, {
-    httpOnly: true,
-    sameSite:
-      (process.env.COOKIE_SAMESITE || "lax").toLowerCase() === "none" ? "none" : "lax",
-    secure: (process.env.COOKIE_SECURE || "false") === "true",
-    path: "/",
-  });
+  try {
+    res.clearCookie(COOKIE_NAME, {
+      httpOnly: true,
+      sameSite:
+        (process.env.COOKIE_SAMESITE || "lax").toLowerCase() === "none"
+          ? "none"
+          : "lax",
+      secure: (process.env.COOKIE_SECURE || "false") === "true",
+      path: "/",
+    });
 
-  await logAudit(req, {
-    actorId: req.user?.id ?? null,
-    action: "AUTH_LOGOUT",
-    entity: "User",
-    entityId: req.user?.id ?? null,
-    meta: { email: req.user?.email },
-  });
+    await logAudit(req, {
+      actorId: req.user?.id ?? null,
+      action: "AUTH_LOGOUT",
+      entity: "User",
+      entityId: req.user?.id ?? null,
+      meta: { email: req.user?.email },
+    });
 
-  return res.status(200).json({ message: "Logout OK" });
-}
-
-// ===== Cambio de contraseña (primer login) =====
-export async function changePasswordCtrl(req, res) {
-  const userId = req.user?.id;
-  const { currentPassword, newPassword } = req.body;
-
-  const profile = await changePasswordSvc({ userId, currentPassword, newPassword });
-
-  const token = signJwt({
-    sub: String(profile.id),
-    id: profile.id,
-    email: profile.email,
-    fullName: profile.fullName,
-    roles: profile.roles,
-    mustChangePassword: profile.mustChangePassword,
-  });
-
-  res.cookie(COOKIE_NAME, token, cookieOptions());
-
-  const claims = verifyJwt(token);
-  const session = buildSessionFromClaims(claims);
-
-  await logAudit(req, {
-    actorId: profile?.id ?? userId ?? null,
-    action: "AUTH_PASSWORD_CHANGE",
-    entity: "User",
-    entityId: profile?.id ?? userId ?? null,
-    meta: { email: profile?.email },
-  });
-
-  return res.status(200).json({
-    message: "Contraseña actualizada",
-    user: profile,
-    session,
-  });
-}
-
-// ===== Recuperación de contraseña =====
-export async function requestPasswordResetCtrl(req, res) {
-  const { email } = req.body;
-
-  await logAudit(req, {
-    actorId: null,
-    action: "AUTH_PASSWORD_RESET_REQUEST",
-    entity: "AUTH",
-    entityId: null,
-    meta: { email },
-  });
-
-  const result = await requestPasswordReset(email);
-
-  if (process.env.TEST_MODE === "true" || process.env.MAILER_DISABLED === "true") {
+    return res.status(200).json({ message: "Logout OK" });
+  } catch (err) {
+    return res
+      .status(getErrorStatus(err))
+      .json({ message: getErrorMessage(err, "No se pudo cerrar sesión") });
   }
+}
 
-  return res.status(200).json(result);
+// ✅ Cambio de contraseña
+export async function changePasswordCtrl(req, res) {
+  try {
+    const userId = req.user?.id;
+    const { currentPassword, newPassword } = req.body;
+
+    const profile = await changePasswordSvc({ userId, currentPassword, newPassword });
+
+    const token = signJwt({
+      sub: String(profile.id),
+      id: profile.id,
+      email: profile.email,
+      fullName: profile.fullName,
+      roles: profile.roles,
+      mustChangePassword: profile.mustChangePassword,
+    });
+
+    res.cookie(COOKIE_NAME, token, cookieOptions());
+
+    const claims = verifyJwt(token);
+    const session = buildSessionFromClaims(claims);
+
+    await logAudit(req, {
+      actorId: profile?.id ?? userId ?? null,
+      action: "AUTH_PASSWORD_CHANGE",
+      entity: "User",
+      entityId: profile?.id ?? userId ?? null,
+      meta: { email: profile?.email },
+    });
+
+    return res.status(200).json({
+      message: "Contraseña actualizada",
+      user: profile,
+      session,
+    });
+  } catch (err) {
+    return res
+      .status(getErrorStatus(err))
+      .json({ message: getErrorMessage(err, "No se pudo cambiar la contraseña") });
+  }
+}
+
+// ✅ Recuperación de contraseña
+export async function requestPasswordResetCtrl(req, res) {
+  try {
+    const { email } = req.body;
+
+    await logAudit(req, {
+      actorId: null,
+      action: "AUTH_PASSWORD_RESET_REQUEST",
+      entity: "AUTH",
+      entityId: null,
+      meta: { email },
+    });
+
+    const result = await requestPasswordReset(email);
+
+    return res.status(200).json(result);
+  } catch (err) {
+    return res
+      .status(getErrorStatus(err))
+      .json({
+        message: getErrorMessage(err, "No se pudo solicitar la recuperación"),
+      });
+  }
 }
 
 export async function resetPasswordCtrl(req, res) {
-  const { email, token, newPassword } = req.body;
-  const result = await resetPassword({ email, token, newPassword });
+  try {
+    const { email, token, newPassword } = req.body;
+    const result = await resetPassword({ email, token, newPassword });
 
-  await logAudit(req, {
-    actorId: null,
-    action: "AUTH_PASSWORD_RESET_SUCCESS",
-    entity: "AUTH",
-    entityId: null,
-    meta: { email },
-  });
+    await logAudit(req, {
+      actorId: null,
+      action: "AUTH_PASSWORD_RESET_SUCCESS",
+      entity: "AUTH",
+      entityId: null,
+      meta: { email },
+    });
 
-  return res.status(200).json(result);
+    return res.status(200).json(result);
+  } catch (err) {
+    return res
+      .status(getErrorStatus(err))
+      .json({
+        message: getErrorMessage(err, "No se pudo restablecer la contraseña"),
+      });
+  }
 }
