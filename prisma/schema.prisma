@@ -287,21 +287,6 @@ model Invoice {
 }
 
 model Payment {
-<<<<<<< Updated upstream
-  id              Int               @id @default(autoincrement())
-  amount          Decimal           @db.Decimal(14, 2)
-  paidAt          DateTime
-  closeAt         DateTime?
-  method          PaymentMethod     @default(TRANSFER)
-  reference       String?
-  createdAt       DateTime          @default(now())
-  purchaseOrderId Int
-  createdById     Int?
-  decidedAt       DateTime?
-  decidedById     Int?
-  decisionComment String?
-  rejectionType   String?
-=======
   id                Int               @id @default(autoincrement())
   amount            Decimal           @db.Decimal(14, 2)
   paidAt            DateTime
@@ -317,7 +302,6 @@ model Payment {
   installmentOf     Int?
   status            PaymentStatus     @default(PENDING)
   isScheduled       Boolean           @default(false)
->>>>>>> Stashed changes
   invoiceErrorsJson Json?
   rejectionType     String?
   closeAt           DateTime?
