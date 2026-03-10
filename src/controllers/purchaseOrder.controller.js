@@ -566,12 +566,25 @@ export async function listPurchaseOrders(req, res) {
   try {
     const { status, providerId, limit = 50, offset = 0 } = req.query;
 
-    const where = {};
-    if (status) {
-      where.status = status.toUpperCase();
+    const roles = (req.user?.roles || []).map((r) =>
+      typeof r === "string" ? r.toUpperCase() : String(r?.name || "").toUpperCase()
+    );
+
+    const isAdmin = roles.includes("ADMIN");
+    const isApprover = roles.includes("APPROVER");
+
+    if (!isAdmin && !isApprover) {
+      return res.status(403).json({ error: "No autorizado para listar órdenes" });
     }
+
+    const where = {};
+
+    if (status) {
+      where.status = String(status).toUpperCase();
+    }
+
     if (providerId) {
-      where.providerId = parseInt(providerId);
+      where.providerId = parseInt(providerId, 10);
     }
 
     const [purchaseOrders, total] = await Promise.all([
@@ -588,8 +601,8 @@ export async function listPurchaseOrders(req, res) {
           },
         },
         orderBy: { createdAt: "desc" },
-        take: parseInt(limit),
-        skip: parseInt(offset),
+        take: parseInt(limit, 10),
+        skip: parseInt(offset, 10),
       }),
       prisma.purchaseOrder.count({ where }),
     ]);
@@ -598,16 +611,17 @@ export async function listPurchaseOrders(req, res) {
       purchaseOrders,
       pagination: {
         total,
-        limit: parseInt(limit),
-        offset: parseInt(offset),
-        hasMore: parseInt(offset) + parseInt(limit) < total,
+        limit: parseInt(limit, 10),
+        offset: parseInt(offset, 10),
+        hasMore: parseInt(offset, 10) + parseInt(limit, 10) < total,
       },
     });
   } catch (error) {
     console.error("Error listando órdenes:", error);
-    return res
-      .status(500)
-      .json({ error: "Error al listar órdenes", detail: error.message });
+    return res.status(500).json({
+      error: "Error al listar órdenes",
+      detail: error.message,
+    });
   }
 }
 

@@ -450,9 +450,19 @@ export async function listPayments(req, res) {
     const { purchaseOrderId, from, to, limit = 50, offset = 0 } = req.query;
 
     const where = {};
+    const roles = (req.user?.roles || []).map((r) =>
+      typeof r === "string" ? r.toUpperCase() : String(r?.name || "").toUpperCase()
+    );
+
+    const isAdminOrApprover =
+      roles.includes("ADMIN") || roles.includes("APPROVER");
+
+    if (!isAdminOrApprover) {
+      return res.status(403).json({ error: "No autorizado para listar pagos" });
+    }
 
     if (purchaseOrderId) {
-      where.purchaseOrderId = parseInt(purchaseOrderId);
+      where.purchaseOrderId = parseInt(purchaseOrderId, 10);
     }
 
     if (from || to) {
@@ -513,6 +523,14 @@ export async function getPayment(req, res) {
   try {
     const { id } = req.params;
 
+    const roles = (req.user?.roles || []).map((r) =>
+      typeof r === "string" ? r.toUpperCase() : String(r?.name || "").toUpperCase()
+    );
+
+    const isAdmin = roles.includes("ADMIN");
+    const isApprover = roles.includes("APPROVER");
+    const isProvider = roles.includes("PROVIDER");
+
     const payment = await prisma.payment.findUnique({
       where: { id: parseInt(id, 10) },
       include: {
@@ -554,11 +572,13 @@ export async function getPayment(req, res) {
             total: true,
             invoiceUploadedAt: true,
             receivedAt: true,
+            providerId: true,
             provider: {
               select: {
                 id: true,
                 businessName: true,
                 rfc: true,
+                emailContacto: true,
               },
             },
           },
@@ -570,12 +590,35 @@ export async function getPayment(req, res) {
       return res.status(404).json({ error: "Pago no encontrado" });
     }
 
-    const paymentWithUrls = await attachSignedUrlsToPayment(payment);
+    if (isAdmin || isApprover) {
+      return res.json(payment);
+    }
 
-    res.json(paymentWithUrls);
+    if (isProvider) {
+      const provider = await prisma.provider.findFirst({
+        where: {
+          emailContacto: req.user?.email,
+          isActive: true,
+          deletedAt: null,
+        },
+        select: { id: true },
+      });
+
+      if (!provider) {
+        return res.status(404).json({ error: "Proveedor no encontrado" });
+      }
+
+      if (payment.purchaseOrder?.providerId !== provider.id) {
+        return res.status(403).json({ error: "No autorizado para ver este pago" });
+      }
+
+      return res.json(payment);
+    }
+
+    return res.status(403).json({ error: "No autorizado" });
   } catch (error) {
     console.error("Error getPayment:", error);
-    res.status(500).json({
+    return res.status(500).json({
       error: "Error al obtener pago",
       detail: error.message,
     });

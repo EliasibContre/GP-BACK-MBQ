@@ -20,13 +20,18 @@ import { createPaymentPlan } from "../controllers/paymentPlan.controller.js";
 const router = express.Router();
 
 /**
- * GET /api/payments - Listar pagos
+ * GET /api/payments
+ * ADMIN / APPROVER solamente
  */
-router.get("/", requireAuth, listPayments);
+router.get(
+  "/",
+  requireAuth,
+  requireRole(["ADMIN", "APPROVER"]),
+  listPayments
+);
 
 /**
- * GET /api/payments/approval - Listar pagos para aprobación
- * ⚠️ Debe ir antes que /:id
+ * GET /api/payments/approval
  */
 router.get(
   "/approval",
@@ -36,8 +41,7 @@ router.get(
 );
 
 /**
- * GET /api/payments/my-plans - Listar parcialidades del proveedor autenticado
- * ⚠️ Debe ir antes que /:id
+ * GET /api/payments/my-plans
  */
 router.get(
   "/my-plans",
@@ -47,7 +51,7 @@ router.get(
 );
 
 /**
- * POST /api/payments - Crear pago
+ * POST /api/payments
  */
 router.post(
   "/",
@@ -57,8 +61,7 @@ router.post(
 );
 
 /**
- * POST /api/payments/plans - Crear plan de pagos
- * ⚠️ Debe ir antes que /:id
+ * POST /api/payments/plans
  */
 router.post(
   "/plans",
@@ -68,8 +71,7 @@ router.post(
 );
 
 /**
- * PATCH /api/payments/:id/decision - Aprobar/Rechazar
- * ⚠️ Debe ir antes que /:id
+ * PATCH /api/payments/:id/decision
  */
 router.patch(
   "/:id/decision",
@@ -79,8 +81,7 @@ router.patch(
 );
 
 /**
- * PATCH /api/payments/:id/submit - Proveedor envía parcialidad a revisión
- * ⚠️ Debe ir antes que /:id
+ * PATCH /api/payments/:id/submit
  */
 router.patch(
   "/:id/submit",
@@ -90,8 +91,7 @@ router.patch(
 );
 
 /**
- * PATCH /api/payments/:id/mark-paid - Marcar como pagado
- * ⚠️ Debe ir antes que /:id
+ * PATCH /api/payments/:id/mark-paid
  */
 router.patch(
   "/:id/mark-paid",
@@ -101,12 +101,17 @@ router.patch(
 );
 
 /**
- * GET /api/payments/:id - Obtener pago
+ * GET /api/payments/:id
+ * Puede entrar cualquier autenticado, pero el controller valida ownership
  */
-router.get("/:id", requireAuth, getPayment);
+router.get(
+  "/:id",
+  requireAuth,
+  getPayment
+);
 
 /**
- * PUT /api/payments/:id - Actualizar pago
+ * PUT /api/payments/:id
  */
 router.put(
   "/:id",
@@ -116,7 +121,7 @@ router.put(
 );
 
 /**
- * DELETE /api/payments/:id - Eliminar pago
+ * DELETE /api/payments/:id
  */
 router.delete(
   "/:id",

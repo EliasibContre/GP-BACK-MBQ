@@ -15,8 +15,6 @@ import {
   approvePurchaseOrder,
   rejectPurchaseOrder,
   markReceivedPurchaseOrder,
-
-  // ✅ NUEVOS (PROVEEDOR)
   updatePurchaseOrder,
   submitPurchaseOrder,
   deletePurchaseOrder,
@@ -25,7 +23,6 @@ import { createPurchaseOrderSchema } from '../schemas/purchaseOrder.schema.js';
 
 const router = Router();
 
-// Configurar multer para recibir archivos en memoria
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 },
@@ -39,16 +36,43 @@ const upload = multer({
   }
 });
 
-// Listar órdenes con filtros
-router.get('/', requireAuth, listPurchaseOrders);
-// Órdenes aprobadas del proveedor autenticado (solo rol PROVIDER)
-router.get('/my-approved', requireAuth, listApprovedForSessionProvider);
-// Órdenes aprobadas sin pagos (para admin/aprobador)
-router.get('/approved-unpaid', requireAuth, requireRole(['ADMIN','APPROVER']), listApprovedUnpaidPurchaseOrders);
+/**
+ * ADMIN / APPROVER: lista general
+ */
+router.get(
+  '/',
+  requireAuth,
+  requireRole(['ADMIN', 'APPROVER']),
+  listPurchaseOrders
+);
 
+/**
+ * PROVIDER: órdenes aprobadas propias
+ */
+router.get(
+  '/my-approved',
+  requireAuth,
+  requireRole(['PROVIDER']),
+  listApprovedForSessionProvider
+);
+
+/**
+ * ADMIN / APPROVER: órdenes aprobadas sin pagos
+ */
+router.get(
+  '/approved-unpaid',
+  requireAuth,
+  requireRole(['ADMIN', 'APPROVER']),
+  listApprovedUnpaidPurchaseOrders
+);
+
+/**
+ * PROVIDER: crear orden
+ */
 router.post(
   '/me',
   requireAuth,
+  requireRole(['PROVIDER']),
   upload.fields([
     { name: 'archivoOrden', maxCount: 1 },
     { name: 'archivoFacturaPdf', maxCount: 10 },
@@ -59,12 +83,23 @@ router.post(
   createPurchaseOrder
 );
 
-router.get('/me', requireAuth, getMyPurchaseOrders);
+/**
+ * PROVIDER: mis órdenes
+ */
+router.get(
+  '/me',
+  requireAuth,
+  requireRole(['PROVIDER']),
+  getMyPurchaseOrders
+);
 
-// ✅ PROVEEDOR: editar orden (solo DRAFT)
+/**
+ * PROVIDER: editar orden
+ */
 router.patch(
   '/:id',
   requireAuth,
+  requireRole(['PROVIDER']),
   upload.fields([
     { name: 'archivoOrden', maxCount: 1 },
     { name: 'archivoFacturaPdf', maxCount: 10 },
@@ -74,27 +109,58 @@ router.patch(
   updatePurchaseOrder
 );
 
-// ✅ PROVEEDOR: enviar a revisión (DRAFT -> SENT)
+/**
+ * PROVIDER: enviar orden
+ */
 router.post(
   '/:id/submit',
   requireAuth,
+  requireRole(['PROVIDER']),
   submitPurchaseOrder
 );
 
-// ✅ PROVEEDOR: eliminar orden (solo DRAFT)
+/**
+ * PROVIDER: eliminar orden
+ */
 router.delete(
   '/:id',
   requireAuth,
+  requireRole(['PROVIDER']),
   deletePurchaseOrder
 );
 
+/**
+ * ADMIN / APPROVER: pendientes de aprobación
+ */
+router.get(
+  '/pending-approval',
+  requireAuth,
+  requireRole(['APPROVER', 'ADMIN']),
+  getPendingApprovalPurchaseOrders
+);
 
-// Endpoint para aprobadores/administradores: obtener órdenes pendientes de aprobación
-router.get('/pending-approval', requireAuth, requireRole(['APPROVER','ADMIN']), getPendingApprovalPurchaseOrders);
+/**
+ * ADMIN / APPROVER: aprobar / rechazar / marcar recibida
+ */
+router.post(
+  '/:id/approve',
+  requireAuth,
+  requireRole(['APPROVER', 'ADMIN']),
+  approvePurchaseOrder
+);
 
-// Endpoints para aprobar/rechazar/marcar recibida
-router.post('/:id/approve', requireAuth, requireRole(['APPROVER','ADMIN']), approvePurchaseOrder);
-router.post('/:id/reject', requireAuth, requireRole(['APPROVER','ADMIN']), rejectPurchaseOrder);
-router.post('/:id/mark-received', requireAuth, requireRole(['APPROVER','ADMIN']), markReceivedPurchaseOrder);
+router.post(
+  '/:id/reject',
+  requireAuth,
+  requireRole(['APPROVER', 'ADMIN']),
+  rejectPurchaseOrder
+);
+
+router.post(
+  '/:id/mark-received',
+  requireAuth,
+  requireRole(['APPROVER', 'ADMIN']),
+  markReceivedPurchaseOrder
+);
 
 export default router;

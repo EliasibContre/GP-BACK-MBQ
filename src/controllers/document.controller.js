@@ -2,12 +2,13 @@
 import { prisma } from "../config/prisma.js";
 import { uploadToSupabase, deleteFromSupabase, getSignedUrl } from "../config/supabase.js";
 import { logAudit } from "../utils/audit.js";
+import { detectContractSignature } from "../utils/contractSignatureDetector.js";
 
 const DOCS_BUCKET = process.env.PROVIDER_DOCS_BUCKET || "provider-documents";
 const SIGNED_URL_EXPIRES = Number(process.env.SIGNED_URL_EXPIRES || 3600);
 
 // límites (ajusta si quieres)
-const MAX_DOC_PDF_MB = Number(process.env.MAX_DOC_PDF_MB || 15);
+const MAX_DOC_PDF_MB = Number(process.env.MAX_DOC_PDF_MB || 30);
 const MAX_DOC_PDF_BYTES = Math.floor(MAX_DOC_PDF_MB * 1024 * 1024);
 
 // Helpers
@@ -61,7 +62,7 @@ async function attachSignedUrlsToDocuments(providerDocuments) {
   }
 
   return out;
-} 
+}
 
 // Obtener tipos de documento según tipo de persona
 export async function getDocumentTypes(req, res) {
@@ -160,6 +161,7 @@ export async function uploadDocuments(req, res) {
     }
 
     // ✅ validar que TODO sea PDF + tamaño
+    // ✅ validación extra solo para CONTRATO: firma visible en última página / zona final
     for (const f of req.files) {
       if (!isPdfFile(f)) {
         return res.status(400).json({
@@ -167,10 +169,94 @@ export async function uploadDocuments(req, res) {
           detail: { fileName: f.originalname, mimetype: f.mimetype },
         });
       }
+
+      const docTypeCode = safeUpper(f.fieldname);
+
+      // límite normal para todos los documentos
+      let maxSize = MAX_DOC_PDF_BYTES;
+
+      // si es contrato, permitir archivos mucho más grandes
+      if (docTypeCode === "CONTRATO") {
+        maxSize = 30 * 1024 * 1024; // 30MB
+      }
+
       try {
-        assertFileSize(f, MAX_DOC_PDF_BYTES, `PDF (${f.fieldname})`);
+        assertFileSize(f, maxSize, `PDF (${f.fieldname})`);
       } catch (e) {
         return res.status(400).json({ error: e.message });
+      }
+
+      if (docTypeCode === "CONTRATO") {
+        let signatureResult;
+
+        try {
+          signatureResult = await detectContractSignature(f.buffer, {
+            scale: 2.2,
+
+            // Ajustado a zona final del contrato
+            regionTopRatio: 0.62,
+            regionBottomRatio: 0.98,
+            regionLeftRatio: 0.30,
+            regionRightRatio: 0.98,
+
+            // Umbrales iniciales razonables
+            darkPixelThreshold: 175,
+            minInkRatio: 0.0030,
+            minActiveRows: 8,
+            minActiveCols: 25,
+            minDarkPixels: 350,
+          });
+        } catch (e) {
+          console.error("Error analizando firma del contrato:", e);
+
+          await logAudit(req, {
+            actorId: userId,
+            action: "CONTRACT_SIGNATURE_CHECK_ERROR",
+            entity: "ProviderDocument",
+            entityId: provider.id,
+            meta: {
+              providerId: provider.id,
+              fileName: f.originalname,
+              reason: e.message || String(e),
+            },
+          });
+
+          return res.status(500).json({
+            error: "No se pudo analizar la firma del contrato. Intenta nuevamente con un PDF legible.",
+          });
+        }
+
+        if (!signatureResult?.detected) {
+          await logAudit(req, {
+            actorId: userId,
+            action: "CONTRACT_SIGNATURE_NOT_DETECTED",
+            entity: "ProviderDocument",
+            entityId: provider.id,
+            meta: {
+              providerId: provider.id,
+              fileName: f.originalname,
+              detection: signatureResult,
+            },
+          });
+
+          return res.status(400).json({
+            error: "El contrato no presenta una firma visible en la zona final de la última página.",
+            code: "CONTRACT_SIGNATURE_NOT_DETECTED",
+            detection: signatureResult,
+          });
+        }
+
+        await logAudit(req, {
+          actorId: userId,
+          action: "CONTRACT_SIGNATURE_DETECTED",
+          entity: "ProviderDocument",
+          entityId: provider.id,
+          meta: {
+            providerId: provider.id,
+            fileName: f.originalname,
+            detection: signatureResult,
+          },
+        });
       }
     }
 

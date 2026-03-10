@@ -15,7 +15,7 @@ const router = Router();
 // Configurar multer para múltiples archivos
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB por archivo
+  limits: { fileSize: 30 * 1024 * 1024 }, // 30MB por archivo
   fileFilter: (req, file, cb) => {
     if (file.mimetype === 'application/pdf') {
       cb(null, true);
