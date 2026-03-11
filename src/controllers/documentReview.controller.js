@@ -6,6 +6,7 @@ import {
   sendDocumentApprovedEmail,
   sendDocumentRejectedEmail,
 } from "../utils/email.js";
+import { createNotification } from "../services/notification.service.js";
 import { logAudit } from "../utils/audit.js";
 
 const DOCS_BUCKET = process.env.PROVIDER_DOCS_BUCKET || "provider-documents";
@@ -128,6 +129,7 @@ export async function getDocumentStats(req, res) {
       prisma.providerDocument.count({ where: { status: "REJECTED" } }),
       prisma.providerDocument.count(),
     ]);
+
     return res.json({ pending, approved, rejected, total });
   } catch (error) {
     console.error("Error getDocumentStats:", error);
@@ -304,8 +306,9 @@ export async function approveDocument(req, res) {
     });
 
     if (!document) return res.status(404).json({ error: "Documento no encontrado" });
-    if (document.status === "APPROVED")
+    if (document.status === "APPROVED") {
       return res.status(400).json({ error: "El documento ya está aprobado" });
+    }
 
     const updatedDocument = await prisma.$transaction(async (tx) => {
       const doc = await tx.providerDocument.update({
@@ -366,22 +369,19 @@ export async function approveDocument(req, res) {
         });
 
         if (providerUser) {
-          await prisma.notification
-            .create({
-              data: {
-                userId: providerUser.id,
-                type: "DOC_APPROVED",
-                entityType: "DOCUMENT",
-                entityId: parseInt(documentId),
-                title: "Documento Aprobado",
-                message: `Tu documento ${updatedDocument.documentType.name} ha sido aprobado.`,
-                data: {
-                  documentType: updatedDocument.documentType.name,
-                  documentCode: updatedDocument.documentType.code,
-                },
-              },
-            })
-            .catch(() => {});
+          await createNotification({
+            userId: providerUser.id,
+            type: "DOC_APPROVED",
+            entityType: "DOCUMENT",
+            entityId: parseInt(documentId),
+            title: "Documento Aprobado",
+            message: `Tu documento ${updatedDocument.documentType.name} ha sido aprobado.`,
+            data: {
+              documentType: updatedDocument.documentType.name,
+              documentCode: updatedDocument.documentType.code,
+            },
+            sendEmail: false,
+          }).catch(() => {});
         }
 
         if (String(process.env.MAILER_DISABLED || "false") !== "true") {
@@ -428,8 +428,9 @@ export async function rejectDocument(req, res) {
     });
 
     if (!document) return res.status(404).json({ error: "Documento no encontrado" });
-    if (document.status === "REJECTED")
+    if (document.status === "REJECTED") {
       return res.status(400).json({ error: "Ya está rechazado" });
+    }
 
     const updatedDocument = await prisma.$transaction(async (tx) => {
       const doc = await tx.providerDocument.update({
@@ -480,23 +481,20 @@ export async function rejectDocument(req, res) {
         });
 
         if (providerUser) {
-          await prisma.notification
-            .create({
-              data: {
-                userId: providerUser.id,
-                type: "DOC_REJECTED",
-                entityType: "DOCUMENT",
-                entityId: parseInt(documentId),
-                title: "Documento Rechazado",
-                message: `Tu documento ${updatedDocument.documentType.name} ha sido rechazado. Motivo: ${reason.trim()}`,
-                data: {
-                  documentType: updatedDocument.documentType.name,
-                  documentCode: updatedDocument.documentType.code,
-                  reason: reason.trim(),
-                },
-              },
-            })
-            .catch(() => {});
+          await createNotification({
+            userId: providerUser.id,
+            type: "DOC_REJECTED",
+            entityType: "DOCUMENT",
+            entityId: parseInt(documentId),
+            title: "Documento Rechazado",
+            message: `Tu documento ${updatedDocument.documentType.name} ha sido rechazado. Motivo: ${reason.trim()}`,
+            data: {
+              documentType: updatedDocument.documentType.name,
+              documentCode: updatedDocument.documentType.code,
+              reason: reason.trim(),
+            },
+            sendEmail: false,
+          }).catch(() => {});
         }
 
         if (String(process.env.MAILER_DISABLED || "false") !== "true") {
@@ -613,7 +611,10 @@ export async function approveDocumentGroup(req, res) {
 
     const [providerIdStr, groupKey] = String(groupId).split("|");
     const providerId = Number(providerIdStr);
-    if (!providerId || !groupKey) return res.status(400).json({ error: "groupId inválido" });
+
+    if (!providerId || !groupKey) {
+      return res.status(400).json({ error: "groupId inválido" });
+    }
 
     const docs = await prisma.providerDocument.findMany({
       where: { providerId },
@@ -663,7 +664,10 @@ export async function rejectDocumentGroup(req, res) {
 
     const [providerIdStr, groupKey] = String(groupId).split("|");
     const providerId = Number(providerIdStr);
-    if (!providerId || !groupKey) return res.status(400).json({ error: "groupId inválido" });
+
+    if (!providerId || !groupKey) {
+      return res.status(400).json({ error: "groupId inválido" });
+    }
 
     const docs = await prisma.providerDocument.findMany({
       where: { providerId },

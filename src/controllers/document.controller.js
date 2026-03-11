@@ -1,6 +1,7 @@
 // src/controllers/document.controller.js
 import { prisma } from "../config/prisma.js";
 import { uploadToSupabase, deleteFromSupabase, getSignedUrl } from "../config/supabase.js";
+import { notifyRoles } from "../services/roleAlerts.service.js";
 import { logAudit } from "../utils/audit.js";
 import { detectContractSignature } from "../utils/contractSignatureDetector.js";
 
@@ -286,13 +287,14 @@ export async function uploadDocuments(req, res) {
         });
 
         uploads.push({ docTypeCode, storageKey, fileName: file.originalname });
-
       } catch (e) {
         console.error("Error subiendo documento a Supabase (fuera tx) tipo:", docTypeCode, e);
 
         // best-effort cleanup
         for (const u of uploads) {
-          try { await deleteFromSupabase(DOCS_BUCKET, u.storageKey); } catch (er) {
+          try {
+            await deleteFromSupabase(DOCS_BUCKET, u.storageKey);
+          } catch (er) {
             console.warn("No se pudo eliminar archivo tras fallo:", u.storageKey, er.message || er);
           }
         }
@@ -305,7 +307,10 @@ export async function uploadDocuments(req, res) {
           meta: { providerId: provider.id, personType, reason: e.message || String(e) },
         });
 
-        return res.status(502).json({ error: "Error subiendo documento a storage", detail: e.message || String(e) });
+        return res.status(502).json({
+          error: "Error subiendo documento a storage",
+          detail: e.message || String(e),
+        });
       }
     }
 
@@ -319,7 +324,12 @@ export async function uploadDocuments(req, res) {
           if (!docType) throw new Error(`Tipo de documento no encontrado: ${u.docTypeCode}`);
 
           const existing = await tx.providerDocument.findUnique({
-            where: { providerId_documentTypeId: { providerId: provider.id, documentTypeId: docType.id } },
+            where: {
+              providerId_documentTypeId: {
+                providerId: provider.id,
+                documentTypeId: docType.id,
+              },
+            },
           });
 
           let document;
@@ -335,7 +345,9 @@ export async function uploadDocuments(req, res) {
                 reviewedById: null,
                 notes: null,
               },
-              include: { documentType: true },
+              include: {
+                documentType: true,
+              },
             });
           } else {
             document = await tx.providerDocument.create({
@@ -347,7 +359,9 @@ export async function uploadDocuments(req, res) {
                 status: "PENDING",
                 uploadedById: userId,
               },
-              include: { documentType: true },
+              include: {
+                documentType: true,
+              },
             });
           }
 
@@ -373,7 +387,9 @@ export async function uploadDocuments(req, res) {
       console.error("Error en transacción al guardar documentos en BD:", e);
 
       for (const u of uploads) {
-        try { await deleteFromSupabase(DOCS_BUCKET, u.storageKey); } catch (er) {
+        try {
+          await deleteFromSupabase(DOCS_BUCKET, u.storageKey);
+        } catch (er) {
           console.warn("No se pudo eliminar archivo tras fallo transacción:", u.storageKey, er.message || er);
         }
       }
@@ -386,7 +402,10 @@ export async function uploadDocuments(req, res) {
         meta: { providerId: provider.id, personType, reason: e.message || String(e) },
       });
 
-      return res.status(500).json({ error: "Error al guardar documentos en base de datos", detail: e.message || String(e) });
+      return res.status(500).json({
+        error: "Error al guardar documentos en base de datos",
+        detail: e.message || String(e),
+      });
     }
 
     await logAudit(req, {
@@ -402,9 +421,37 @@ export async function uploadDocuments(req, res) {
       },
     });
 
+    // ✅ NUEVO: notificar a aprobadores por documentos subidos
+    try {
+      const providerName = provider.businessName || req.user?.email || "Proveedor";
+
+      await notifyRoles({
+        roleNames: ["APPROVER"],
+        type: "DOCUMENT_SUBMITTED",
+        entityType: "DOCUMENT",
+        entityId: savedDocuments[0]?.id || provider.id,
+        title: "Nuevos documentos por revisar",
+        message: `El proveedor ${providerName} subió documentos y requieren revisión.`,
+        data: {
+          providerId: provider.id,
+          providerName,
+          personType,
+          documentsCount: savedDocuments.length,
+          documentIds: savedDocuments.map((d) => d.id),
+          documentTypes: savedDocuments.map((d) => d.documentType?.name || d.documentType?.code || null),
+        },
+        sendEmail: true,
+      });
+    } catch (e) {
+      console.error("Error notificando a aprobadores por documentos subidos:", e);
+    }
+
     const docsWithSigned = await attachSignedUrlsToDocuments(savedDocuments);
 
-    return res.status(201).json({ message: "Documentos subidos correctamente", documents: docsWithSigned });
+    return res.status(201).json({
+      message: "Documentos subidos correctamente",
+      documents: docsWithSigned,
+    });
   } catch (error) {
     console.error("Error al subir documentos:", error);
 

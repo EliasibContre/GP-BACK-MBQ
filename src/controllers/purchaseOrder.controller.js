@@ -4,9 +4,11 @@ import {
   sendPurchaseOrderApprovedEmail,
   sendPurchaseOrderRejectedEmail,
 } from "../utils/email.js";
+import { createNotification } from "../services/notification.service.js";
 import { uploadToSupabase, deleteFromSupabase } from "../config/supabase.js";
 import path from "path";
-import { validateCfdiXml } from "../utils/cfdiValidation.js"; // ✅ NUEVO
+import { validateCfdiXml } from "../utils/cfdiValidation.js";
+import { notifyRoles } from "../services/roleAlerts.service.js";
 
 function toLocalNoon(dateStr) {
   // dateStr esperado: "YYYY-MM-DD"
@@ -109,8 +111,7 @@ export async function createPurchaseOrder(req, res) {
           const u = String(v.data.uuid).toUpperCase();
           if (seenUuids.has(u)) {
             return res.status(400).json({
-              error:
-                "Factura XML duplicada (UUID repetido en el mismo envío)",
+              error: "Factura XML duplicada (UUID repetido en el mismo envío)",
               uuid: u,
               file: xmlF.originalname,
               index: i,
@@ -139,7 +140,7 @@ export async function createPurchaseOrder(req, res) {
         "purchase-orders",
         orderPath,
         orderFile.buffer,
-        "application/pdf"
+        "application/pdf",
       );
 
       // ⚠️ Nota: esto asume que uploadToSupabase devuelve { url, path }.
@@ -149,7 +150,10 @@ export async function createPurchaseOrder(req, res) {
 
       uploadedKeys.push({ bucket: "purchase-orders", key: orderUpload.path });
     } catch (e) {
-      console.error("Error subiendo Orden de Compra a Supabase:", e.message || e);
+      console.error(
+        "Error subiendo Orden de Compra a Supabase:",
+        e.message || e,
+      );
       return res.status(502).json({
         error: "Error subiendo archivo de orden de compra",
         detail: e.message || String(e),
@@ -174,7 +178,7 @@ export async function createPurchaseOrder(req, res) {
           "invoices",
           pdfPath,
           pdfF.buffer,
-          "application/pdf"
+          "application/pdf",
         );
         uploadedKeys.push({ bucket: "invoices", key: upPdf.path });
 
@@ -182,7 +186,7 @@ export async function createPurchaseOrder(req, res) {
           "invoices",
           xmlPath,
           xmlF.buffer,
-          "application/xml"
+          "application/xml",
         );
         uploadedKeys.push({ bucket: "invoices", key: upXml.path });
 
@@ -205,7 +209,7 @@ export async function createPurchaseOrder(req, res) {
             "No se pudo eliminar en rollback:",
             k.bucket,
             k.key,
-            er.message || er
+            er.message || er,
           );
         }
       }
@@ -329,7 +333,7 @@ export async function getMyPurchaseOrders(req, res) {
         createdBy: {
           select: { fullName: true, email: true },
         },
-        poInvoices: true, // ✅ NUEVO
+        poInvoices: true,
       },
       orderBy: { createdAt: "desc" },
     });
@@ -390,9 +394,14 @@ export async function approvePurchaseOrder(req, res) {
         .status(400)
         .json({ error: "Solo se pueden aprobar órdenes en estado SENT" });
     }
+
     const updated = await prisma.purchaseOrder.update({
       where: { id },
-      data: { status: "APPROVED", approvedById: approverId, approvedAt: new Date() },
+      data: {
+        status: "APPROVED",
+        approvedById: approverId,
+        approvedAt: new Date(),
+      },
       include: { provider: true, createdBy: true },
     });
 
@@ -405,27 +414,63 @@ export async function approvePurchaseOrder(req, res) {
       },
     });
 
+    try {
+      const providerFull = await prisma.provider.findFirst({
+        where: { id: provider.id },
+        select: { id: true, businessName: true, rfc: true },
+      });
+
+      const providerName =
+        providerFull?.businessName || req.user?.email || "Proveedor";
+
+      await notifyRoles({
+        roleNames: ["ADMIN", "APPROVER"],
+        type: "PO_SUBMITTED",
+        entityType: "PURCHASE_ORDER",
+        entityId: updated.id,
+        title: "Nueva orden por revisar",
+        message: `El proveedor ${providerName} subió la orden ${updated.number} y requiere revisión.`,
+        data: {
+          purchaseOrderId: updated.id,
+          number: updated.number,
+          providerId: provider.id,
+          providerName,
+          rfc: providerFull?.rfc || null,
+        },
+        sendEmail: true,
+      });
+    } catch (e) {
+      console.error("Error notificando roles por orden enviada:", e);
+    }
+
     // Crear notificación para el usuario que creó la orden (si existe)
     try {
       const recipientUserId =
-        updated.createdById || (updated.createdBy ? updated.createdBy.id : null);
+        updated.createdById ||
+        (updated.createdBy ? updated.createdBy.id : null);
+
       if (recipientUserId) {
-        await prisma.notification.create({
+        await createNotification({
+          userId: recipientUserId,
+          type: "PO_APPROVED",
+          entityType: "PURCHASE_ORDER",
+          entityId: id,
+          title: "Orden Aprobada",
+          message: `Tu orden ${updated.number} ha sido aprobada.`,
           data: {
-            userId: recipientUserId,
-            type: "PO_APPROVED",
-            entityType: "PURCHASE_ORDER",
-            entityId: id,
-            title: "Orden Aprobada",
-            message: `Tu orden ${updated.number} ha sido aprobada.`,
-            data: { number: updated.number, total: updated.total ? String(updated.total) : null },
+            number: updated.number,
+            total: updated.total ? String(updated.total) : null,
           },
+          sendEmail: false,
         });
       }
 
       // Enviar correo al contacto del proveedor si existe
       const providerEmail = updated.provider?.emailContacto;
-      if (providerEmail && String(process.env.MAILER_DISABLED || "false") !== "true") {
+      if (
+        providerEmail &&
+        String(process.env.MAILER_DISABLED || "false") !== "true"
+      ) {
         try {
           await sendPurchaseOrderApprovedEmail(providerEmail, {
             number: updated.number,
@@ -438,6 +483,27 @@ export async function approvePurchaseOrder(req, res) {
       }
     } catch (e) {
       console.error("Error notificando/mandando email al aprobar PO:", e);
+    }
+
+    try {
+      const providerName = updated.provider?.businessName || "Proveedor";
+
+      await notifyRoles({
+        roleNames: ["ADMIN"],
+        type: "PO_APPROVED_ADMIN_ALERT",
+        entityType: "PURCHASE_ORDER",
+        entityId: id,
+        title: "Orden aprobada",
+        message: `La orden ${updated.number} del proveedor ${providerName} fue aprobada.`,
+        data: {
+          purchaseOrderId: updated.id,
+          number: updated.number,
+          providerName,
+        },
+        sendEmail: true,
+      });
+    } catch (e) {
+      console.error("Error notificando a admins por orden aprobada:", e);
     }
 
     return res.json({ message: "Orden aprobada", data: updated });
@@ -453,8 +519,10 @@ export async function rejectPurchaseOrder(req, res) {
     const id = Number(req.params.id);
     const approverId = req.user?.id;
     const { reason } = req.body || {};
-    if (!reason || String(reason).trim().length < 3)
+
+    if (!reason || String(reason).trim().length < 3) {
       return res.status(400).json({ error: "Motivo requerido" });
+    }
 
     const po = await prisma.purchaseOrder.findUnique({ where: { id } });
     if (!po) return res.status(404).json({ error: "Orden no encontrada" });
@@ -467,7 +535,8 @@ export async function rejectPurchaseOrder(req, res) {
       where: { id },
       data: {
         status: "CANCELLED",
-        obervations: (po.obervations || "") + "\nRECHAZO: " + String(reason).trim(),
+        obervations:
+          (po.obervations || "") + "\nRECHAZO: " + String(reason).trim(),
       },
       include: { provider: true, createdBy: true },
     });
@@ -485,28 +554,38 @@ export async function rejectPurchaseOrder(req, res) {
     // Notificar y enviar correo al proveedor/usuario creador
     try {
       const recipientUserId =
-        updated.createdById || (updated.createdBy ? updated.createdBy.id : null);
+        updated.createdById ||
+        (updated.createdBy ? updated.createdBy.id : null);
+
       if (recipientUserId) {
-        await prisma.notification.create({
+        await createNotification({
+          userId: recipientUserId,
+          type: "PO_REJECTED",
+          entityType: "PURCHASE_ORDER",
+          entityId: id,
+          title: "Orden Rechazada",
+          message: `Tu orden ${updated.number} ha sido rechazada. Motivo: ${reason}`,
           data: {
-            userId: recipientUserId,
-            type: "PO_REJECTED",
-            entityType: "PURCHASE_ORDER",
-            entityId: id,
-            title: "Orden Rechazada",
-            message: `Tu orden ${updated.number} ha sido rechazada. Motivo: ${reason}`,
-            data: { number: updated.number, reason },
+            number: updated.number,
+            reason,
           },
+          sendEmail: false,
         });
       }
 
       const providerEmail = updated.provider?.emailContacto;
-      if (providerEmail && String(process.env.MAILER_DISABLED || "false") !== "true") {
+      if (
+        providerEmail &&
+        String(process.env.MAILER_DISABLED || "false") !== "true"
+      ) {
         try {
           await sendPurchaseOrderRejectedEmail(
             providerEmail,
-            { number: updated.number, total: updated.total ? String(updated.total) : "" },
-            reason
+            {
+              number: updated.number,
+              total: updated.total ? String(updated.total) : "",
+            },
+            reason,
           );
         } catch (e) {
           console.error("Error enviando email PO rechazado:", e.message);
@@ -531,10 +610,12 @@ export async function markReceivedPurchaseOrder(req, res) {
     const userId = req.user?.id;
     const po = await prisma.purchaseOrder.findUnique({ where: { id } });
     if (!po) return res.status(404).json({ error: "Orden no encontrada" });
-    if (po.status !== "APPROVED" && po.status !== "SENT")
+
+    if (po.status !== "APPROVED" && po.status !== "SENT") {
       return res.status(400).json({
         error: "Orden no puede marcarse como recibida en su estado actual",
       });
+    }
 
     const updated = await prisma.purchaseOrder.update({
       where: { id },
@@ -563,14 +644,18 @@ export async function listPurchaseOrders(req, res) {
     const { status, providerId, limit = 50, offset = 0 } = req.query;
 
     const roles = (req.user?.roles || []).map((r) =>
-      typeof r === "string" ? r.toUpperCase() : String(r?.name || "").toUpperCase()
+      typeof r === "string"
+        ? r.toUpperCase()
+        : String(r?.name || "").toUpperCase(),
     );
 
     const isAdmin = roles.includes("ADMIN");
     const isApprover = roles.includes("APPROVER");
 
     if (!isAdmin && !isApprover) {
-      return res.status(403).json({ error: "No autorizado para listar órdenes" });
+      return res
+        .status(403)
+        .json({ error: "No autorizado para listar órdenes" });
     }
 
     const where = {};
@@ -626,16 +711,20 @@ export async function listApprovedForSessionProvider(req, res) {
   try {
     const roles = (req.user && req.user.roles) || [];
     const isProviderRole = roles.some(
-      (r) => String(r.name).toUpperCase() === "PROVIDER"
+      (r) => String(r.name).toUpperCase() === "PROVIDER",
     );
+
     if (!isProviderRole) {
-      return res.status(403).json({ error: "Solo disponible para rol PROVIDER" });
+      return res
+        .status(403)
+        .json({ error: "Solo disponible para rol PROVIDER" });
     }
 
     const provider = await prisma.provider.findFirst({
       where: { emailContacto: req.user.email, isActive: true, deletedAt: null },
       select: { id: true },
     });
+
     if (!provider) {
       return res.json({ purchaseOrders: [] });
     }
@@ -643,7 +732,13 @@ export async function listApprovedForSessionProvider(req, res) {
     const purchaseOrders = await prisma.purchaseOrder.findMany({
       where: { providerId: provider.id, status: "APPROVED" },
       orderBy: { createdAt: "desc" },
-      select: { id: true, number: true, total: true, status: true, providerId: true },
+      select: {
+        id: true,
+        number: true,
+        total: true,
+        status: true,
+        providerId: true,
+      },
     });
 
     return res.json({ purchaseOrders });
@@ -660,17 +755,21 @@ export async function listApprovedForSessionProvider(req, res) {
 export async function listApprovedUnpaidPurchaseOrders(req, res) {
   try {
     const { providerId, limit = 100, offset = 0 } = req.query;
+
     const where = {
       status: "APPROVED",
       NOT: { payments: { some: {} } },
     };
+
     if (providerId) where.providerId = parseInt(providerId);
 
     const [purchaseOrders, total] = await Promise.all([
       prisma.purchaseOrder.findMany({
         where,
         include: {
-          provider: { select: { id: true, businessName: true, emailContacto: true } },
+          provider: {
+            select: { id: true, businessName: true, emailContacto: true },
+          },
         },
         orderBy: { createdAt: "desc" },
         take: parseInt(limit),
@@ -705,19 +804,25 @@ export async function submitPurchaseOrder(req, res) {
 
     const provider = await prisma.provider.findFirst({
       where: { emailContacto: userEmail, isActive: true, deletedAt: null },
-      select: { id: true },
+      select: { id: true, businessName: true, rfc: true },
     });
-    if (!provider) return res.status(404).json({ error: "Proveedor no encontrado" });
+    if (!provider) {
+      return res.status(404).json({ error: "Proveedor no encontrado" });
+    }
 
     const po = await prisma.purchaseOrder.findUnique({ where: { id } });
-    if (!po) return res.status(404).json({ error: "Orden no encontrada" });
+    if (!po) {
+      return res.status(404).json({ error: "Orden no encontrada" });
+    }
 
     if (po.providerId !== provider.id) {
       return res.status(403).json({ error: "No autorizado" });
     }
 
     if (po.status !== "DRAFT") {
-      return res.status(400).json({ error: "Solo se pueden enviar órdenes en DRAFT" });
+      return res
+        .status(400)
+        .json({ error: "Solo se pueden enviar órdenes en DRAFT" });
     }
 
     const updated = await prisma.purchaseOrder.update({
@@ -734,6 +839,31 @@ export async function submitPurchaseOrder(req, res) {
         meta: { from: "DRAFT", to: "SENT" },
       },
     });
+
+    // ✅ NUEVO: avisar a ADMIN y APPROVER que hay una orden por revisar
+    try {
+      const providerName =
+        provider.businessName || req.user?.email || "Proveedor";
+
+      await notifyRoles({
+        roleNames: ["ADMIN", "APPROVER"],
+        type: "PO_SUBMITTED",
+        entityType: "PURCHASE_ORDER",
+        entityId: updated.id,
+        title: "Nueva orden por revisar",
+        message: `El proveedor ${providerName} subió la orden ${updated.number} y requiere revisión.`,
+        data: {
+          purchaseOrderId: updated.id,
+          number: updated.number,
+          providerId: provider.id,
+          providerName,
+          rfc: provider.rfc || null,
+        },
+        sendEmail: true,
+      });
+    } catch (e) {
+      console.error("Error notificando roles por orden enviada:", e);
+    }
 
     return res.json({
       message: "Orden enviada a revisión correctamente",
@@ -755,12 +885,15 @@ export async function deletePurchaseOrder(req, res) {
       where: { emailContacto: userEmail, isActive: true, deletedAt: null },
       select: { id: true, businessName: true },
     });
-    if (!provider) return res.status(404).json({ error: "Proveedor no encontrado" });
+
+    if (!provider)
+      return res.status(404).json({ error: "Proveedor no encontrado" });
 
     const po = await prisma.purchaseOrder.findUnique({
       where: { id },
       include: { poInvoices: true },
     });
+
     if (!po) return res.status(404).json({ error: "Orden no encontrada" });
 
     if (po.providerId !== provider.id) {
@@ -768,7 +901,9 @@ export async function deletePurchaseOrder(req, res) {
     }
 
     if (po.status !== "DRAFT") {
-      return res.status(400).json({ error: "Solo se pueden eliminar órdenes en DRAFT" });
+      return res
+        .status(400)
+        .json({ error: "Solo se pueden eliminar órdenes en DRAFT" });
     }
 
     // Recolectar keys para borrar en storage (best effort)
@@ -791,7 +926,9 @@ export async function deletePurchaseOrder(req, res) {
     const uniq = (arr) => [...new Set(arr.filter(Boolean))];
 
     await prisma.$transaction(async (tx) => {
-      await tx.purchaseOrderInvoice.deleteMany({ where: { purchaseOrderId: id } });
+      await tx.purchaseOrderInvoice.deleteMany({
+        where: { purchaseOrderId: id },
+      });
       await tx.purchaseOrder.delete({ where: { id } });
 
       await tx.auditLog.create({
@@ -817,14 +954,23 @@ export async function deletePurchaseOrder(req, res) {
       try {
         await deleteFromSupabase("purchase-orders", key);
       } catch (e) {
-        console.warn("No se pudo borrar archivo de purchase-orders:", key, e.message || e);
+        console.warn(
+          "No se pudo borrar archivo de purchase-orders:",
+          key,
+          e.message || e,
+        );
       }
     }
+
     for (const key of uniq(keysInvoices)) {
       try {
         await deleteFromSupabase("invoices", key);
       } catch (e) {
-        console.warn("No se pudo borrar archivo de invoices:", key, e.message || e);
+        console.warn(
+          "No se pudo borrar archivo de invoices:",
+          key,
+          e.message || e,
+        );
       }
     }
 
@@ -853,7 +999,9 @@ export async function updatePurchaseOrder(req, res) {
     if (fecha) {
       issuedAt = toLocalNoon(fecha);
       if (!issuedAt) {
-        return res.status(400).json({ error: "Fecha inválida (usa YYYY-MM-DD)" });
+        return res
+          .status(400)
+          .json({ error: "Fecha inválida (usa YYYY-MM-DD)" });
       }
     }
 
@@ -861,6 +1009,7 @@ export async function updatePurchaseOrder(req, res) {
       where: { emailContacto: userEmail, isActive: true, deletedAt: null },
       select: { id: true, businessName: true },
     });
+
     if (!provider) {
       return res.status(404).json({ error: "Proveedor no encontrado" });
     }
@@ -873,6 +1022,7 @@ export async function updatePurchaseOrder(req, res) {
         },
       },
     });
+
     if (!po) {
       return res.status(404).json({ error: "Orden no encontrada" });
     }
@@ -882,7 +1032,9 @@ export async function updatePurchaseOrder(req, res) {
     }
 
     if (po.status !== "DRAFT") {
-      return res.status(400).json({ error: "Solo se pueden editar órdenes en DRAFT" });
+      return res
+        .status(400)
+        .json({ error: "Solo se pueden editar órdenes en DRAFT" });
     }
 
     const orderFile = req.files?.archivoOrden?.[0] || null;
@@ -914,27 +1066,43 @@ export async function updatePurchaseOrder(req, res) {
     const wantsMutateInvoices = hasInvoiceRemovals || hasNewInvoiceFiles;
 
     const basenameNoExt = (v = "") => {
-      const raw = String(v || "").split("?")[0].split("#")[0].split("/").pop() || "";
-      return raw.replace(/\.[^.]+$/, "").trim().toUpperCase();
+      const raw =
+        String(v || "")
+          .split("?")[0]
+          .split("#")[0]
+          .split("/")
+          .pop() || "";
+      return raw
+        .replace(/\.[^.]+$/, "")
+        .trim()
+        .toUpperCase();
     };
 
     const nameOnly = (v = "") =>
-      String(v || "").split("?")[0].split("#")[0].split("/").pop() || "";
+      String(v || "")
+        .split("?")[0]
+        .split("#")[0]
+        .split("/")
+        .pop() || "";
 
     const removedPdfSet = new Set(
-      removedPdfNames.map((x) => basenameNoExt(x)).filter(Boolean)
+      removedPdfNames.map((x) => basenameNoExt(x)).filter(Boolean),
     );
     const removedXmlSet = new Set(
-      removedXmlNames.map((x) => basenameNoExt(x)).filter(Boolean)
+      removedXmlNames.map((x) => basenameNoExt(x)).filter(Boolean),
     );
 
     // Si manda nuevas facturas, deben venir pareadas
     if (hasNewInvoiceFiles) {
       if (invoicePdfFiles.length === 0) {
-        return res.status(400).json({ error: "Debe subir al menos un PDF de factura" });
+        return res
+          .status(400)
+          .json({ error: "Debe subir al menos un PDF de factura" });
       }
       if (invoiceXmlFiles.length === 0) {
-        return res.status(400).json({ error: "Debe subir al menos un XML de factura" });
+        return res
+          .status(400)
+          .json({ error: "Debe subir al menos un XML de factura" });
       }
       if (invoicePdfFiles.length !== invoiceXmlFiles.length) {
         return res.status(400).json({
@@ -999,7 +1167,7 @@ export async function updatePurchaseOrder(req, res) {
           "purchase-orders",
           orderPath,
           orderFile.buffer,
-          "application/pdf"
+          "application/pdf",
         );
         newOrder = { url: up.url, path: up.path };
         uploadedKeys.push({ bucket: "purchase-orders", key: up.path });
@@ -1029,7 +1197,7 @@ export async function updatePurchaseOrder(req, res) {
             "invoices",
             pdfPath,
             pdfF.buffer,
-            "application/pdf"
+            "application/pdf",
           );
           uploadedKeys.push({ bucket: "invoices", key: upPdf.path });
 
@@ -1037,7 +1205,7 @@ export async function updatePurchaseOrder(req, res) {
             "invoices",
             xmlPath,
             xmlF.buffer,
-            "application/xml"
+            "application/xml",
           );
           uploadedKeys.push({ bucket: "invoices", key: upXml.path });
 
@@ -1049,7 +1217,10 @@ export async function updatePurchaseOrder(req, res) {
           });
         }
       } catch (e) {
-        console.error("Error subiendo nuevas facturas a Supabase:", e.message || e);
+        console.error(
+          "Error subiendo nuevas facturas a Supabase:",
+          e.message || e,
+        );
 
         for (const k of uploadedKeys.reverse()) {
           try {
@@ -1059,7 +1230,7 @@ export async function updatePurchaseOrder(req, res) {
               "No se pudo eliminar en rollback (update):",
               k.bucket,
               k.key,
-              er.message || er
+              er.message || er,
             );
           }
         }
@@ -1082,8 +1253,12 @@ export async function updatePurchaseOrder(req, res) {
       const shouldRemove =
         removedPdfSet.has(pdfBase) ||
         removedXmlSet.has(xmlBase) ||
-        removedPdfSet.has(basenameNoExt(nameOnly(inv.pdfStorageKey || inv.pdfUrl || ""))) ||
-        removedXmlSet.has(basenameNoExt(nameOnly(inv.xmlStorageKey || inv.xmlUrl || "")));
+        removedPdfSet.has(
+          basenameNoExt(nameOnly(inv.pdfStorageKey || inv.pdfUrl || "")),
+        ) ||
+        removedXmlSet.has(
+          basenameNoExt(nameOnly(inv.xmlStorageKey || inv.xmlUrl || "")),
+        );
 
       if (shouldRemove) {
         removedInvoiceRecords.push(inv);
@@ -1186,7 +1361,9 @@ export async function updatePurchaseOrder(req, res) {
                 monto: monto != null ? String(monto) : undefined,
                 fecha: fecha || undefined,
                 observaciones:
-                  observaciones !== undefined ? observaciones || null : undefined,
+                  observaciones !== undefined
+                    ? observaciones || null
+                    : undefined,
               },
               orderFileReplaced: Boolean(newOrder),
               orderMarkedRemoved: removeOrder,
@@ -1209,7 +1386,11 @@ export async function updatePurchaseOrder(req, res) {
       try {
         await deleteFromSupabase("purchase-orders", oldOrderKey);
       } catch (e) {
-        console.warn("No se pudo borrar orden anterior:", oldOrderKey, e.message || e);
+        console.warn(
+          "No se pudo borrar orden anterior:",
+          oldOrderKey,
+          e.message || e,
+        );
       }
     }
 
@@ -1217,7 +1398,11 @@ export async function updatePurchaseOrder(req, res) {
       try {
         await deleteFromSupabase("invoices", key);
       } catch (e) {
-        console.warn("No se pudo borrar factura anterior:", key, e.message || e);
+        console.warn(
+          "No se pudo borrar factura anterior:",
+          key,
+          e.message || e,
+        );
       }
     }
 

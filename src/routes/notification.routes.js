@@ -1,3 +1,4 @@
+// routes/notification.routes.js
 import { Router } from 'express';
 import { getMyNotifications, readNotification, readAllNotifications } from '../controllers/notification.controller.js';
 import { requireAuth } from '../middlewares/requireAuth.js';

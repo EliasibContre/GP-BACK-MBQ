@@ -1,8 +1,9 @@
+// src/controllers/provider.controller.js
 import { prisma } from '../config/prisma.js';
 import { generateTempPassword, hashPassword } from '../utils/password.js';
 import { sendProviderWelcomeEmail } from '../utils/email.js';
+import { createNotification } from '../services/notification.service.js';
 import { logAudit } from "../utils/audit.js";
-
 
 const RFC_REGEX = /^[A-ZÑ&]{3,4}\d{6}[A-Z0-9]{3}$/i;
 
@@ -87,7 +88,6 @@ export async function searchProviders(req, res, next) {
 
 export async function getProviderByRfc(req, res, next) {
   try {
-
     const rfc = String(req.params.rfc || '').trim().toUpperCase();
     if (!RFC_REGEX.test(rfc)) return res.status(400).json({ message: 'RFC inválido' });
 
@@ -119,9 +119,12 @@ export async function getProviderByRfcStrict(req, res, next) {
         telefono: true, direccionFiscal: true, observaciones: true
       }
     });
+
     if (!provider) return res.status(404).json({ message: 'Proveedor no encontrado' });
     res.json({ provider });
-  } catch (err) { next(err); }
+  } catch (err) {
+    next(err);
+  }
 }
 
 export async function createProvider(req, res, next) {
@@ -157,16 +160,28 @@ export async function createProvider(req, res, next) {
         provisionalPassword = generateTempPassword(12);
         const passwordHash = await hashPassword(provisionalPassword);
         user = await tx.user.create({
-          data: { email, passwordHash, fullName: 'Proveedor', isActive: true, mustChangePassword: true }
+          data: {
+            email,
+            passwordHash,
+            fullName: 'Proveedor',
+            isActive: true,
+            mustChangePassword: true
+          }
         });
       }
 
       // Asegurar rol PROVIDER
-      let providerRole = await tx.role.findFirst({ where: { name: { in: ['PROVIDER', 'provider', 'Provider'] } } });
+      let providerRole = await tx.role.findFirst({
+        where: { name: { in: ['PROVIDER', 'provider', 'Provider'] } }
+      });
       if (!providerRole) {
         providerRole = await tx.role.create({ data: { name: 'PROVIDER' } });
       }
-      const existingUserProviderRole = await tx.userRole.findFirst({ where: { userId: user.id, roleId: providerRole.id } });
+
+      const existingUserProviderRole = await tx.userRole.findFirst({
+        where: { userId: user.id, roleId: providerRole.id }
+      });
+
       if (!existingUserProviderRole) {
         await tx.userRole.create({ data: { userId: user.id, roleId: providerRole.id } });
       }
@@ -196,7 +211,11 @@ export async function createProvider(req, res, next) {
       // Cuenta bancaria opcional
       if (bankName || clabe) {
         await tx.providerBankAccount.create({
-          data: { providerId: provider.id, bankName: bankName || null, clabe: clabe || null }
+          data: {
+            providerId: provider.id,
+            bankName: bankName || null,
+            clabe: clabe || null
+          }
         });
       }
 
@@ -243,9 +262,59 @@ export async function createProvider(req, res, next) {
       }
     });
 
-    if (isNewUser && provisionalPassword && email && String(process.env.MAILER_DISABLED || 'false') !== 'true') {
+    // ✅ NUEVO: notificación a admins/aprobadores
+    try {
+      const adminUsers = await prisma.user.findMany({
+        where: {
+          roles: {
+            some: {
+              role: {
+                name: { in: ['ADMIN', 'APPROVER'] }
+              }
+            }
+          }
+        },
+        select: { id: true }
+      });
+
+      for (const admin of adminUsers) {
+        await createNotification({
+          userId: admin.id,
+          type: 'PROVIDER_CREATED',
+          entityType: 'PROVIDER',
+          entityId: result.providerId,
+          title: 'Nuevo proveedor registrado',
+          message: `Se registró el proveedor ${result.providerBusinessName} (${result.providerRfc}).`,
+          data: {
+            providerId: result.providerId,
+            businessName: result.providerBusinessName,
+            rfc: result.providerRfc,
+            personType: result.personType,
+            emailContacto: email,
+            isNewUser
+          }
+        });
+      }
+    } catch (notifyErr) {
+      console.error(
+        'No se pudieron crear notificaciones de proveedor:',
+        notifyErr?.message || notifyErr
+      );
+    }
+
+    if (
+      isNewUser &&
+      provisionalPassword &&
+      email &&
+      String(process.env.MAILER_DISABLED || 'false') !== 'true'
+    ) {
       try {
-        await sendProviderWelcomeEmail(email, { businessName: result.providerBusinessName, rfc: result.providerRfc }, provisionalPassword, result.personType);
+        await sendProviderWelcomeEmail(
+          email,
+          { businessName: result.providerBusinessName, rfc: result.providerRfc },
+          provisionalPassword,
+          result.personType
+        );
       } catch (mailErr) {
         console.error('No se pudo enviar correo de bienvenida proveedor:', mailErr.message || mailErr);
       }
@@ -266,12 +335,11 @@ export async function createProvider(req, res, next) {
   }
 }
 
-
 export async function inactivateProvider(req, res, next) {
   try {
     const { id } = req.params;
     const { reason, notes } = req.body;
-    const userId = req.user.id; // del middleware requireAuth
+    const userId = req.user.id;
 
     const providerId = parseInt(id);
     if (isNaN(providerId)) {
@@ -279,7 +347,6 @@ export async function inactivateProvider(req, res, next) {
     }
 
     const result = await prisma.$transaction(async (tx) => {
-      // Verifica que el proveedor existe y está activo
       const provider = await tx.provider.findUnique({
         where: { id: providerId },
       });
@@ -296,7 +363,6 @@ export async function inactivateProvider(req, res, next) {
         throw err;
       }
 
-      // Actualiza el proveedor
       const updated = await tx.provider.update({
         where: { id: providerId },
         data: {
@@ -351,12 +417,12 @@ export async function reactivateProvider(req, res, next) {
     });
 
     await logAudit(req, {
-  actorId: req.user?.id ?? null,
-  action: "PROVIDER_REACTIVATE",
-  entity: "Provider",
-  entityId: providerId,
-  meta: {}
-});
+      actorId: req.user?.id ?? null,
+      action: "PROVIDER_REACTIVATE",
+      entity: "Provider",
+      entityId: providerId,
+      meta: {}
+    });
 
     res.json({
       message: 'Proveedor reactivado exitosamente',
@@ -398,7 +464,6 @@ export async function updateProvider(req, res, next) {
         throw err;
       }
 
-      // snapshot antes
       const before = {
         businessName: provider.businessName,
         rfc: provider.rfc,
@@ -423,7 +488,6 @@ export async function updateProvider(req, res, next) {
         }
       }
 
-      // Actualizar User
       if (emailContacto !== undefined || newPassword !== undefined) {
         const currentUser = await tx.user.findUnique({
           where: { email: provider.emailContacto }
@@ -462,7 +526,6 @@ export async function updateProvider(req, res, next) {
         }
       }
 
-      // Update Provider
       const updateProviderData = {};
       if (businessName !== undefined) updateProviderData.businessName = businessName.trim();
       if (emailContacto !== undefined) updateProviderData.emailContacto = emailContacto.trim().toLowerCase();
@@ -476,7 +539,6 @@ export async function updateProvider(req, res, next) {
         data: updateProviderData
       });
 
-      // Bank account
       if (bankName !== undefined || clabe !== undefined) {
         const existingBankAccount = provider.bankAccounts[0];
 
@@ -515,7 +577,6 @@ export async function updateProvider(req, res, next) {
       if (newPassword) changed.password = { from: "****", to: "****" };
       if (bankName !== undefined || clabe !== undefined) changed.bankAccount = true;
 
-      // ✅ Audit TX
       await tx.auditLog.create({
         data: {
           actorId,
@@ -533,7 +594,6 @@ export async function updateProvider(req, res, next) {
 
     }, { maxWait: 10000, timeout: 15000 });
 
-    // ✅ Audit extra con ip/ua
     await logAudit(req, {
       actorId,
       action: "PROVIDER_UPDATE",
@@ -600,7 +660,6 @@ export async function getMyProviderData(req, res, next) {
     const userEmail = req.user.email;
     const userId = req.user.id;
 
-    // Buscar proveedor por email de contacto
     const provider = await prisma.provider.findFirst({
       where: {
         emailContacto: userEmail,
@@ -623,7 +682,6 @@ export async function getMyProviderData(req, res, next) {
       });
     }
 
-    // Buscar datos del usuario
     const user = await prisma.user.findUnique({
       where: { id: userId },
       select: {
@@ -634,26 +692,18 @@ export async function getMyProviderData(req, res, next) {
       }
     });
 
-    // Formatear respuesta
     const response = {
-      // Datos Fiscales
       businessName: provider.businessName || '',
       rfc: provider.rfc || '',
       fiscalAddress: provider.direccionFiscal || '',
-
-      // Datos de Contacto
       fullName: user?.fullName || '',
       contactPosition: provider.contactPosition || '',
       email: userEmail,
       phone: user?.phone || provider.telefono || '',
-      deliveryAddress: provider.direccionFiscal || '', // usamos la misma dirección fiscal
-
-      // Datos Bancarios
+      deliveryAddress: provider.direccionFiscal || '',
       clabe: provider.bankAccounts[0]?.clabe || '',
       bankName: provider.bankAccounts[0]?.bankName || '',
       bankAccountId: provider.bankAccounts[0]?.id || null,
-
-      // IDs
       providerId: provider.id
     };
 
@@ -670,23 +720,17 @@ export async function updateMyProviderData(req, res, next) {
     const userEmail = req.user.email;
     const userId = req.user.id;
     const {
-      // Datos Fiscales
       businessName,
       rfc,
       fiscalAddress,
-
-      // Datos de Contacto
       fullName,
       contactPosition,
       phone,
-
-      // Datos Bancarios
       clabe,
       bankName,
       bankAccountId
     } = req.body;
 
-    // Buscar proveedor por email
     const provider = await prisma.provider.findFirst({
       where: {
         emailContacto: userEmail,
@@ -699,7 +743,6 @@ export async function updateMyProviderData(req, res, next) {
       return res.status(404).json({ error: 'Proveedor no encontrado' });
     }
 
-    // Verificar si el RFC ya existe (si cambió)
     if (rfc && rfc !== provider.rfc) {
       const existingRfc = await prisma.provider.findFirst({
         where: {
@@ -713,9 +756,7 @@ export async function updateMyProviderData(req, res, next) {
       }
     }
 
-    // Actualizar en transacción
     await prisma.$transaction(async (tx) => {
-      // 1. Actualizar datos del Usuario (fullName, phone)
       if (fullName || phone) {
         await tx.user.update({
           where: { id: userId },
@@ -726,7 +767,6 @@ export async function updateMyProviderData(req, res, next) {
         });
       }
 
-      // 2. Actualizar datos del Proveedor
       await tx.provider.update({
         where: { id: provider.id },
         data: {
@@ -738,9 +778,7 @@ export async function updateMyProviderData(req, res, next) {
         }
       });
 
-      // 3. Actualizar o crear cuenta bancaria
       if (clabe && bankName) {
-        // Verificar si la CLABE ya existe
         const clabeExists = await tx.providerBankAccount.findFirst({
           where: {
             clabe,
@@ -753,13 +791,11 @@ export async function updateMyProviderData(req, res, next) {
         }
 
         if (bankAccountId) {
-          // Actualizar cuenta existente
           await tx.providerBankAccount.update({
             where: { id: bankAccountId },
             data: { clabe, bankName }
           });
         } else {
-          // Crear nueva cuenta
           await tx.providerBankAccount.create({
             data: {
               providerId: provider.id,
@@ -799,12 +835,8 @@ export async function updateMyProviderData(req, res, next) {
 export async function getAdminProvidersTable(req, res, next) {
   try {
     const q = String(req.query.q || "").trim();
-
-    // ✅ NUEVO: status opcional para filtrar activos/inactivos/todos
-    // default: "active" para NO romper nada
     const status = String(req.query.status || "active").trim().toLowerCase();
 
-    // Arma where sin romper lo que ya tienes
     const where = {
       ...(q
         ? {
@@ -816,13 +848,10 @@ export async function getAdminProvidersTable(req, res, next) {
         : {}),
     };
 
-    // ✅ Mantener comportamiento actual: si no mandan status, solo activos
     if (status === "active") where.isActive = true;
     else if (status === "inactive") where.isActive = false;
     else if (status === "all") {
-      // no filtra por isActive
     } else {
-      // status inválido => fallback a comportamiento actual
       where.isActive = true;
     }
 
@@ -838,12 +867,8 @@ export async function getAdminProvidersTable(req, res, next) {
         isApproved: true,
         personType: true,
         observaciones: true,
-
-        // ✅ opcionales (no rompen front; útiles para Reactivación)
         inactivatedAt: true,
         inactiveReason: true,
-
-        // ✅ Facturas (Invoice)
         invoices: {
           orderBy: { createdAt: "desc" },
           take: 5,
@@ -854,8 +879,6 @@ export async function getAdminProvidersTable(req, res, next) {
             createdAt: true,
           },
         },
-
-        // ✅ Órdenes de compra (PurchaseOrder)
         purchaseOrders: {
           orderBy: { createdAt: "desc" },
           take: 5,
@@ -866,8 +889,6 @@ export async function getAdminProvidersTable(req, res, next) {
             createdAt: true,
           },
         },
-
-        // ✅ Documentos de respaldo (ProviderDocument + DocumentType)
         documents: {
           orderBy: { createdAt: "desc" },
           take: 5,
@@ -881,11 +902,8 @@ export async function getAdminProvidersTable(req, res, next) {
       },
     });
 
-    // 🔁 Mapeo EXACTO a lo que tu tabla espera (para no romper el front)
     const rows = providers.map((p) => {
       const estatus = !p.isActive ? "Inactivo" : !p.isApproved ? "En revisión" : "Activo";
-
-      // “categoria” no existe en BD: usamos personType como etiqueta (puedes cambiarlo luego)
       const categoria = p.personType ? (p.personType === "MORAL" ? "Moral" : "Física") : "Sin categoría";
 
       return {
@@ -894,26 +912,20 @@ export async function getAdminProvidersTable(req, res, next) {
         categoria,
         estatus,
         comentarios: p.observaciones ? [p.observaciones] : [],
-
-        // (Opcional extra para Reactivación; si tu tabla los ignora, no pasa nada)
         inactivatedAt: p.inactivatedAt || null,
         inactiveReason: p.inactiveReason || null,
-
-        // DocumentList espera {id, nombre, tamaño}
         facturas: p.invoices.map((i) => ({
           id: i.id,
           nombre: `factura_${i.number || i.id}.pdf`,
           tamaño: "-",
           url: i.pdfUrl || null,
         })),
-
         ordenesCompra: p.purchaseOrders.map((o) => ({
           id: o.id,
           nombre: `oc_${o.number || o.id}.pdf`,
           tamaño: "-",
           url: o.pdfUrl || null,
         })),
-
         documentosRespaldo: p.documents.map((d) => ({
           id: d.id,
           nombre: `${d.documentType?.name || "documento"}.pdf`,

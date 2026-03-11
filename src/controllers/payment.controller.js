@@ -2,6 +2,7 @@
 import { prisma } from "../config/prisma.js";
 import { supabase } from "../config/supabase.js";
 import { createNotification } from "../services/notification.service.js";
+import { notifyRoles } from "../services/roleAlerts.service.js";
 import { sendPaymentRegisteredEmail } from "../utils/email.js";
 import { logAudit } from "../utils/audit.js";
 
@@ -210,7 +211,6 @@ export async function createPayment(req, res) {
       },
     });
 
-
     res.status(201).json({
       message: "Pago registrado correctamente",
       payment,
@@ -249,6 +249,7 @@ export async function createPayment(req, res) {
             installmentNo: payment.installmentNo,
             installmentOf: payment.installmentOf,
           },
+          sendEmail: false,
         });
       }
 
@@ -276,6 +277,7 @@ export async function createPayment(req, res) {
               installmentNo: payment.installmentNo,
               installmentOf: payment.installmentOf,
             },
+            sendEmail: false,
           });
         }
 
@@ -428,7 +430,6 @@ export async function deletePayment(req, res) {
         providerName: payment.purchaseOrder.provider.businessName,
       },
     });
-
 
     res.json({ message: "Pago eliminado correctamente" });
   } catch (error) {
@@ -867,6 +868,31 @@ export async function decidePayment(req, res) {
 
     const updatedWithUrls = await attachSignedUrlsToPayment(updated);
 
+    if (decision === "APPROVE") {
+      try {
+        const providerName =
+          payment.purchaseOrder?.provider?.businessName || "Proveedor";
+
+        await notifyRoles({
+          roleNames: ["ADMIN"],
+          type: "PAYMENT_APPROVED_ADMIN_ALERT",
+          entityType: "PAYMENT",
+          entityId: updated.id,
+          title: "Pago aprobado",
+          message: `El pago de la orden ${payment.purchaseOrder?.number} del proveedor ${providerName} fue aprobado.`,
+          data: {
+            paymentId: updated.id,
+            purchaseOrderId: payment.purchaseOrder?.id,
+            purchaseOrderNumber: payment.purchaseOrder?.number,
+            providerName,
+          },
+          sendEmail: true,
+        });
+      } catch (e) {
+        console.error("Error notificando a admins por pago aprobado:", e);
+      }
+    }
+
     res.json({
       message: decision === "APPROVE" ? "Pago aprobado" : "Pago rechazado",
       payment: updatedWithUrls,
@@ -1013,12 +1039,10 @@ async function resolveProviderIdFromSession(req) {
 // =========================
 export async function listMyPaymentPlans(req, res) {
   try {
-
     let providerId = req.user?.providerId ?? req.user?.provider?.id ?? null;
     if (!providerId) {
       providerId = await resolveProviderIdFromSession(req);
     }
-
 
     if (!providerId) {
       return res.status(400).json({
@@ -1187,6 +1211,29 @@ export async function submitPaymentForReview(req, res) {
     });
 
     const updatedWithUrls = await attachSignedUrlsToPayment(updated);
+
+    try {
+      const providerName =
+        updated.purchaseOrder?.provider?.businessName || "Proveedor";
+
+      await notifyRoles({
+        roleNames: ["ADMIN", "APPROVER"],
+        type: "PAYMENT_SUBMITTED",
+        entityType: "PAYMENT",
+        entityId: updated.id,
+        title: "Nuevo pago por revisar",
+        message: `El proveedor ${providerName} subió un pago para la orden ${updated.purchaseOrder?.number} y requiere revisión.`,
+        data: {
+          paymentId: updated.id,
+          purchaseOrderId: updated.purchaseOrder?.id,
+          purchaseOrderNumber: updated.purchaseOrder?.number,
+          providerName,
+        },
+        sendEmail: true,
+      });
+    } catch (e) {
+      console.error("Error notificando roles por pago enviado:", e);
+    }
 
     return res.json({
       message: "Parcialidad enviada a revisión",

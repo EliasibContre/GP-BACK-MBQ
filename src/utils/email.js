@@ -1,9 +1,13 @@
+// utils/email.js
 import { mailer } from "../config/mailer.js";
 
 const FROM = process.env.MAIL_FROM || "MBQ Proveedores <no-reply@mbqinc.com>";
 
 async function logMailInfo(info) {
-  console.log("Mail enviado:", { messageId: info?.messageId, response: info?.response });
+  console.log("Mail enviado:", {
+    messageId: info?.messageId,
+    response: info?.response,
+  });
 
   try {
     const nodemailer = await import("nodemailer");
@@ -200,14 +204,19 @@ export function sendPaymentRegisteredEmail(to, payment, purchaseOrder) {
   return send({ to, subject, text, html });
 }
 
-export function sendProviderWelcomeEmail(to, provider, tempPassword, personType) {
+export function sendProviderWelcomeEmail(
+  to,
+  provider,
+  tempPassword,
+  personType,
+) {
   const subject = "Alta de proveedor - Acceso al portal";
   const tipo =
     personType === "FISICA"
       ? "Persona Física"
       : personType === "MORAL"
-      ? "Persona Moral"
-      : "Proveedor";
+        ? "Persona Moral"
+        : "Proveedor";
 
   const text =
     `Bienvenido/a ${provider.businessName}\n\n` +
@@ -227,6 +236,68 @@ export function sendProviderWelcomeEmail(to, provider, tempPassword, personType)
       <div style="font-size:20px;font-weight:700;margin:12px 0;background:#f0f9ff;padding:12px;border-radius:8px;">${tempPassword}</div>
       <p style="font-size:14px;color:#444">Por seguridad, esta contraseña debe ser cambiada al primer acceso.</p>
       <p style="margin-top:20px;font-size:12px;color:#666">Si no solicitaste este acceso, contacta al administrador.</p>
+    </div>
+  `;
+
+  return send({ to, subject, text, html });
+}
+
+export function sendPlatformNotificationEmail(to, notification) {
+  const subject = notification?.title
+    ? `Notificación: ${notification.title}`
+    : "Nueva notificación en MBQ Proveedores";
+
+  const safeTitle = notification?.title || "Nueva notificación";
+  const safeMessage =
+    notification?.message || "Tienes una nueva notificación en la plataforma.";
+
+  const text =
+    `${safeTitle}\n\n` +
+    `${safeMessage}\n\n` +
+    `Ingresa a la plataforma para revisar el detalle.`;
+
+  const html = `
+    <div style="font-family:system-ui,Arial,sans-serif;line-height:1.5;color:#111">
+      <h2 style="margin-bottom:8px;">${safeTitle}</h2>
+      <p style="margin:0 0 12px 0;">${safeMessage}</p>
+
+      <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:14px;margin:16px 0;">
+        <p style="margin:0;">
+          Tienes una nueva notificación en <strong>MBQ Proveedores</strong>.
+        </p>
+      </div>
+
+      <p style="margin-top:16px;">
+        Ingresa a la plataforma para revisar el detalle.
+      </p>
+
+      <p style="margin-top:20px;font-size:12px;color:#666;">
+        Este es un correo automático de notificación.
+      </p>
+    </div>
+  `;
+
+  return send({ to, subject, text, html });
+}
+
+export function sendRoleAlertEmail(to, subject, title, message) {
+  const text =
+    `${title}\n\n` +
+    `${message}\n\n` +
+    `Ingresa a la plataforma MBQ Proveedores para revisar el detalle.`;
+
+  const html = `
+    <div style="font-family:system-ui,Arial,sans-serif;line-height:1.5;color:#111">
+      <h2 style="margin-bottom:8px;">${title}</h2>
+      <p style="margin:0 0 12px 0;">${message}</p>
+      <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:14px;margin:16px 0;">
+        <p style="margin:0;">
+          Este aviso fue generado automáticamente por <strong>MBQ Proveedores</strong>.
+        </p>
+      </div>
+      <p style="margin-top:16px;">
+        Ingresa a la plataforma para revisar y dar seguimiento.
+      </p>
     </div>
   `;
 

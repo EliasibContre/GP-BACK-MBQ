@@ -1,4 +1,4 @@
-// src/controllers/notifications.controller.js
+// src/controllers/notification.controller.js
 import {
   listNotifications,
   markNotificationRead,
@@ -8,7 +8,6 @@ import {
 import { asyncHandler } from "../utils/asyncHandler.js";
 
 export const getMyNotifications = asyncHandler(async (req, res) => {
-
   const unreadOnly = req.query.unread === "1" || req.query.unread === "true";
 
   const items = await listNotifications(req.user.id, { unreadOnly });
@@ -28,7 +27,7 @@ export const readAllNotifications = asyncHandler(async (req, res) => {
 });
 
 /**
- * ✅ NUEVO: borrar SOLO notificaciones de solicitudes de usuario
+ * Borra SOLO notificaciones del flujo "Solicitudes de usuario"
  * Ruta sugerida: DELETE /api/notifications/:id/user-request
  */
 export const deleteUserRequestNotif = asyncHandler(async (req, res) => {
