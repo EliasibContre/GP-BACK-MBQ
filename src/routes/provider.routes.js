@@ -12,11 +12,11 @@ import {
   getMyProviderData,
   updateMyProviderData,
   getProviderByRfcStrict,
-  getAdminProvidersTable, // ✅ NUEVO
+  getAdminProvidersTable, //  NUEVO
 } from "../controllers/provider.controller.js";
 
 import { requireAuth } from "../middlewares/requireAuth.js";
-import { requireRole } from "../middlewares/requireRole.js"; // ✅ NUEVO (necesario para ADMIN)
+import { requireRole } from "../middlewares/requireRole.js"; //  NUEVO (necesario para ADMIN)
 import validate from "../middlewares/validate.js";
 import {
   createProviderSchema,
@@ -28,7 +28,7 @@ import {
 const router = Router();
 
 /**
- * ✅ NUEVA RUTA: tabla para dashboard/admin
+ *  NUEVA RUTA: tabla para dashboard/admin
  * IMPORTANTE: va ANTES de '/:rfc' para que no choque con el param dinámico.
  */
 router.get("/admin/table", requireAuth, requireRole("ADMIN"), getAdminProvidersTable);

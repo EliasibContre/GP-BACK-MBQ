@@ -82,7 +82,7 @@ export async function createNotification({
 }
 
 /**
- * ✅ Borra SOLO notificaciones del flujo "Solicitudes de usuario"
+ *  Borra SOLO notificaciones del flujo "Solicitudes de usuario"
  * Ajusta USER_REQUEST al type real si en tu proyecto usas otro nombre.
  */
 export async function deleteUserRequestNotification(userId, id) {

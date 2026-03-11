@@ -35,7 +35,7 @@ router.get(
   getProviderDashboardStats
 );
 
-// ✅ Approver dashboard stats - Approver only
+//  Approver dashboard stats - Approver only
 router.get(
   "/approver-dashboard",
   requireAuth,

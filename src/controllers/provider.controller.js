@@ -219,7 +219,7 @@ export async function createProvider(req, res, next) {
         });
       }
 
-      // ✅ Auditoría (tx)
+      //  Auditoría (tx)
       await tx.auditLog.create({
         data: {
           actorId: req.user?.id ?? null,
@@ -246,7 +246,7 @@ export async function createProvider(req, res, next) {
       };
     });
 
-    // ✅ Audit extra con ip/ua
+    //  Audit extra con ip/ua
     await logAudit(req, {
       actorId: req.user?.id ?? null,
       action: "PROVIDER_CREATE",
@@ -262,7 +262,7 @@ export async function createProvider(req, res, next) {
       }
     });
 
-    // ✅ NUEVO: notificación a admins/aprobadores
+    //  NUEVO: notificación a admins/aprobadores
     try {
       const adminUsers = await prisma.user.findMany({
         where: {

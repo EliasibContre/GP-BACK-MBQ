@@ -53,7 +53,7 @@ router.post(
   rejectDocumentGroup
 );
 
-// ✅ ver / descargar (por documentId)
+//  ver / descargar (por documentId)
 router.get("/:documentId/view", viewDocument);
 router.get("/:documentId/download", downloadDocument);
 

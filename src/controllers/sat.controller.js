@@ -130,7 +130,7 @@ function buildHeaderIndex(rows) {
 }
 
 /**
- * ✅ Path fijo "latest" (SIN acumulaciones)
+ *  Path fijo "latest" (SIN acumulaciones)
  * Guarda siempre el último archivo importado. Sobrescribe por extensión.
  * Ej:
  *  imports/sat-blacklist/latest.xlsx
@@ -175,7 +175,7 @@ export async function importSatBlacklist(req, res) {
 
             await uploadToSupabase(bucket, storagePath, buffer, {
                 contentType: mimetype || "application/octet-stream",
-                upsert: true, // ✅ reemplaza, no acumula
+                upsert: true, //  reemplaza, no acumula
             });
 
         } catch (e) {

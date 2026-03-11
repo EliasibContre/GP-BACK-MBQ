@@ -39,7 +39,7 @@ export async function createPurchaseOrder(req, res) {
     const userEmail = req.user.email;
     const { monto, fecha, numeroOrden, rfc, observaciones } = req.body;
 
-    // ✅ Validar y normalizar fecha (antes de subir archivos)
+    //  Validar y normalizar fecha (antes de subir archivos)
     const issuedAt = toLocalNoon(fecha);
     if (!issuedAt) {
       return res.status(400).json({ error: "Fecha inválida (usa YYYY-MM-DD)" });
@@ -89,7 +89,7 @@ export async function createPurchaseOrder(req, res) {
       });
     }
 
-    // ✅ NUEVO: Validar que los XMLs sean CFDI timbrado (antes de subir a storage)
+    //  NUEVO: Validar que los XMLs sean CFDI timbrado (antes de subir a storage)
     {
       const seenUuids = new Set();
 
@@ -350,7 +350,7 @@ export async function getPendingApprovalPurchaseOrders(req, res) {
   try {
     const { limit = 50, cursor } = req.query;
 
-    // ✅ Regla: SOLO órdenes enviadas a revisión
+    //  Regla: SOLO órdenes enviadas a revisión
     const statuses = ["SENT"];
 
     const take = Math.min(Number(limit) || 50, 200);
@@ -840,7 +840,7 @@ export async function submitPurchaseOrder(req, res) {
       },
     });
 
-    // ✅ NUEVO: avisar a ADMIN y APPROVER que hay una orden por revisar
+    //  NUEVO: avisar a ADMIN y APPROVER que hay una orden por revisar
     try {
       const providerName =
         provider.businessName || req.user?.email || "Proveedor";

@@ -116,7 +116,7 @@ export async function createAccessRequest(data) {
     },
   });
 
-  // ✅ NUEVO: crear notificación para admins/aprobadores
+  //  NUEVO: crear notificación para admins/aprobadores
   try {
     const adminUsers = await prisma.user.findMany({
       where: {

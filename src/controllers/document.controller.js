@@ -32,7 +32,7 @@ function assertFileSize(file, maxBytes, label) {
 }
 
 /**
- * ✅ StorageKey determinístico y fijo (SOLO PDF)
+ *  StorageKey determinístico y fijo (SOLO PDF)
  * Un documento por tipo: siempre sobrescribe el mismo path.
  * Ej: 123/INE.pdf  |  123/CSF.pdf
  */
@@ -145,7 +145,7 @@ export async function uploadDocuments(req, res) {
       return res.status(400).json({ error: "No se subieron archivos" });
     }
 
-    // ✅ validar required docs
+    //  validar required docs
     const requiredDocTypes = await prisma.documentType.findMany({
       where: { requiredFor: { has: personType }, isRequired: true },
     });
@@ -159,8 +159,8 @@ export async function uploadDocuments(req, res) {
       });
     }
 
-    // ✅ validar que TODO sea PDF + tamaño
-    // ✅ validación extra solo para CONTRATO: firma visible en última página / zona final
+    //  validar que TODO sea PDF + tamaño
+    //  validación extra solo para CONTRATO: firma visible en última página / zona final
     for (const f of req.files) {
       if (!isPdfFile(f)) {
         return res.status(400).json({
@@ -259,7 +259,7 @@ export async function uploadDocuments(req, res) {
       }
     }
 
-    // ✅ AUDIT: intento subida
+    //  AUDIT: intento subida
     await logAudit(req, {
       actorId: userId,
       action: "DOC_UPLOAD_START",
@@ -277,7 +277,7 @@ export async function uploadDocuments(req, res) {
     for (const file of req.files) {
       const docTypeCode = file.fieldname;
 
-      // ✅ path fijo: SIEMPRE {providerId}/{docType}.pdf
+      //  path fijo: SIEMPRE {providerId}/{docType}.pdf
       const storageKey = buildDocStorageKey(provider.id, docTypeCode);
 
       try {
@@ -334,7 +334,7 @@ export async function uploadDocuments(req, res) {
 
           let document;
           if (existing) {
-            // ✅ ya no borramos previo: path fijo + upsert sobrescribe
+            //  ya no borramos previo: path fijo + upsert sobrescribe
             document = await tx.providerDocument.update({
               where: { id: existing.id },
               data: {
@@ -421,7 +421,7 @@ export async function uploadDocuments(req, res) {
       },
     });
 
-    // ✅ NUEVO: notificar a aprobadores por documentos subidos
+    //  NUEVO: notificar a aprobadores por documentos subidos
     try {
       const providerName = provider.businessName || req.user?.email || "Proveedor";
 

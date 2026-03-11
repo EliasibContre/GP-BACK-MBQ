@@ -15,7 +15,7 @@ const FORCE_RETURN_CODE =
 const MAILER_DISABLED =
   String(process.env.MAILER_DISABLED || "false").toLowerCase() === "true";
 
-// ✅ Helper: intenta enviar email, pero no deja caer el login si falla
+//  Helper: intenta enviar email, pero no deja caer el login si falla
 async function trySendEmail(fn, fallbackLog) {
   if (MAILER_DISABLED) {
     // Dev puro: no enviar
@@ -151,7 +151,7 @@ export async function startLogin({ email, password }) {
 
   const fallbackLog = `[DEV] Código para ${email}: ${code}`;
 
-  // ✅ intenta correo; si falla NO cae
+  //  intenta correo; si falla NO cae
   const emailResult = await trySendEmail(
     () => sendLoginCodeEmail(user.email, code),
     (TEST_MODE || FORCE_RETURN_CODE) ? fallbackLog : null

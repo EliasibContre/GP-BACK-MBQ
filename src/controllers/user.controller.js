@@ -3,12 +3,12 @@ import { prisma } from "../config/prisma.js";
 import { hashPassword } from "../utils/password.js";
 import { sendTemporaryPasswordEmail } from "../utils/email.js";
 
-// ✅ Include reutilizable: trae pivote + role.name
+// Include reutilizable: trae pivote + role.name
 const USER_INCLUDE = {
   roles: { include: { role: true } },
 };
 
-// ✅ Normaliza roles a array de strings: ["ADMIN", "APPROVER"]
+//  Normaliza roles a array de strings: ["ADMIN", "APPROVER"]
 const rolesToNames = (user) => {
   const roles = Array.isArray(user?.roles) ? user.roles : [];
   return roles
@@ -27,7 +27,7 @@ function generateTempPassword(length = 12) {
   return out;
 }
 
-// ✅ Soporta role: "ADMIN" o roles: ["ADMIN"]
+//  Soporta role: "ADMIN" o roles: ["ADMIN"]
 function pickRoleFromBody(body) {
   if (typeof body?.role === "string" && body.role.trim()) return body.role.trim();
   if (Array.isArray(body?.roles) && body.roles.length) {
@@ -42,7 +42,7 @@ export async function createUser(req, res, next) {
   try {
     const { fullName, email, department } = req.body;
 
-    // ✅ soporta role o roles[]
+    //  soporta role o roles[]
     const roleRaw = pickRoleFromBody(req.body);
     const roleName = String(roleRaw || "").toUpperCase(); // ADMIN / APPROVER / PROVIDER
 
@@ -86,7 +86,7 @@ export async function createUser(req, res, next) {
           data: { userId: user.id, roleId: dbRole.id },
         });
 
-        // ✅ incluye role.name
+        //  incluye role.name
         return await tx.user.findUnique({
           where: { id: user.id },
           include: USER_INCLUDE,
@@ -107,7 +107,7 @@ export async function createUser(req, res, next) {
     } else {
     }
 
-    // ✅ devuelve roles como strings también
+    //  devuelve roles como strings también
     res.status(201).json({
       message: "Usuario creado correctamente",
       user: {
@@ -145,7 +145,7 @@ export async function updateUser(req, res, next) {
 
     const { fullName, department, isActive } = req.body;
 
-    // ✅ soporta role o roles[]
+    //  soporta role o roles[]
     const roleRaw = pickRoleFromBody(req.body);
     const roleName = roleRaw ? String(roleRaw).toUpperCase() : undefined;
 
@@ -303,7 +303,7 @@ export async function getMe(req, res, next) {
 
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      include: USER_INCLUDE, // ✅ ya unificado
+      include: USER_INCLUDE, //  ya unificado
     });
 
     if (!user) return res.status(404).json({ message: "Usuario no encontrado" });

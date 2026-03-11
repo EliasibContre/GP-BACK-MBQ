@@ -79,7 +79,7 @@ function getErrorMessage(err, fallback = "Error del servidor") {
   return err?.message || fallback;
 }
 
-// ✅ REGISTRO
+//  REGISTRO
 export async function registerCtrl(req, res) {
   try {
     const { email, fullName, password, roles } = req.body;
@@ -124,7 +124,7 @@ export async function registerCtrl(req, res) {
   }
 }
 
-// ✅ Paso 1: credenciales
+//  Paso 1: credenciales
 export async function loginStartCtrl(req, res) {
   const { email, password } = req.body;
 
@@ -165,7 +165,7 @@ export async function loginStartCtrl(req, res) {
   }
 }
 
-// ✅ Paso 2: verifica código
+//  Paso 2: verifica código
 export async function loginVerifyCtrl(req, res) {
   const { email, code } = req.body;
 
@@ -227,7 +227,7 @@ export async function resendCodeCtrl(req, res) {
   }
 }
 
-// ✅ Perfil
+// Perfil
 export async function meCtrl(req, res) {
   try {
     if (!req.user) {
@@ -276,7 +276,7 @@ export async function logoutCtrl(req, res) {
   }
 }
 
-// ✅ Cambio de contraseña
+// Cambio de contraseña
 export async function changePasswordCtrl(req, res) {
   try {
     const userId = req.user?.id;
@@ -318,7 +318,7 @@ export async function changePasswordCtrl(req, res) {
   }
 }
 
-// ✅ Recuperación de contraseña
+//  Recuperación de contraseña
 export async function requestPasswordResetCtrl(req, res) {
   try {
     const { email } = req.body;

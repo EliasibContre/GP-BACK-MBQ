@@ -268,7 +268,7 @@ export async function getDocumentGroupFiles(req, res) {
       createdAt: d.createdAt,
       updatedAt: d.updatedAt ?? d.createdAt,
 
-      // ✅ Para el front
+      //  Para el front
       viewUrl: `/api/document-reviews/${d.id}/view`,
       downloadUrl: `/api/document-reviews/${d.id}/download`,
     }));
@@ -523,7 +523,7 @@ export async function rejectDocument(req, res) {
 
 // ------------------ View / Download ------------------
 
-// ✅ VER (inline)
+//  VER (inline)
 export async function viewDocument(req, res) {
   try {
     const { documentId } = req.params;
@@ -553,7 +553,7 @@ export async function viewDocument(req, res) {
   }
 }
 
-// ✅ DESCARGAR (attachment) — AQUI está el fix del 500
+//  DESCARGAR (attachment) — AQUI está el fix del 500
 export async function downloadDocument(req, res) {
   try {
     const { documentId } = req.params;
@@ -588,7 +588,7 @@ export async function downloadDocument(req, res) {
     res.setHeader("Content-Type", contentType);
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
 
-    // ✅ node-fetch => r.body es Node Readable => pipe directo
+    //  node-fetch => r.body es Node Readable => pipe directo
     if (!r.body || typeof r.body.pipe !== "function") {
       return res.status(500).json({ error: "No se pudo streamear el archivo" });
     }
