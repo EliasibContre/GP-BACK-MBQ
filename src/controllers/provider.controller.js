@@ -390,6 +390,47 @@ export async function inactivateProvider(req, res, next) {
       meta: { reason, notes }
     });
 
+    // Notificación a admins/aprobadores por baja de proveedor
+    try {
+      const adminUsers = await prisma.user.findMany({
+        where: {
+          roles: {
+            some: {
+              role: {
+                name: { in: ['ADMIN', 'APPROVER'] }
+              }
+            }
+          }
+        },
+        select: { id: true }
+      });
+
+      for (const admin of adminUsers) {
+        await createNotification({
+          userId: admin.id,
+          type: 'PROVIDER_INACTIVATED',
+          entityType: 'PROVIDER',
+          entityId: result.id,
+          title: 'Proveedor dado de baja',
+          message: `El proveedor ${result.businessName} (${result.rfc}) fue dado de baja.${reason ? ` Motivo: ${reason}` : ''}`,
+          data: {
+            providerId: result.id,
+            businessName: result.businessName,
+            rfc: result.rfc,
+            reason: reason || null,
+            notes: notes || null,
+            inactivatedAt: result.inactivatedAt,
+            inactivatedBy: result.inactivatedBy,
+          }
+        });
+      }
+    } catch (notifyErr) {
+      console.error(
+        'No se pudieron crear notificaciones de baja de proveedor:',
+        notifyErr?.message || notifyErr
+      );
+    }
+
     res.json({
       message: 'Proveedor dado de baja exitosamente',
       provider: result,
@@ -405,6 +446,7 @@ export async function reactivateProvider(req, res, next) {
   try {
     const { id } = req.params;
     const providerId = parseInt(id);
+    const userId = req.user?.id ?? null;
 
     const updated = await prisma.provider.update({
       where: { id: providerId },
@@ -417,20 +459,59 @@ export async function reactivateProvider(req, res, next) {
     });
 
     await logAudit(req, {
-      actorId: req.user?.id ?? null,
+      actorId: userId,
       action: "PROVIDER_REACTIVATE",
       entity: "Provider",
       entityId: providerId,
       meta: {}
     });
 
+    // Notificación a admins/aprobadores por reactivación de proveedor
+    try {
+      const adminUsers = await prisma.user.findMany({
+        where: {
+          roles: {
+            some: {
+              role: {
+                name: { in: ["ADMIN", "APPROVER"] }
+              }
+            }
+          }
+        },
+        select: { id: true }
+      });
+
+      for (const admin of adminUsers) {
+        await createNotification({
+          userId: admin.id,
+          type: "PROVIDER_REACTIVATED",
+          entityType: "PROVIDER",
+          entityId: updated.id,
+          title: "Proveedor reactivado",
+          message: `El proveedor ${updated.businessName} (${updated.rfc}) fue reactivado exitosamente.`,
+          data: {
+            providerId: updated.id,
+            businessName: updated.businessName,
+            rfc: updated.rfc,
+            reactivatedAt: new Date(),
+            reactivatedBy: userId,
+          }
+        });
+      }
+    } catch (notifyErr) {
+      console.error(
+        "No se pudieron crear notificaciones de reactivación de proveedor:",
+        notifyErr?.message || notifyErr
+      );
+    }
+
     res.json({
-      message: 'Proveedor reactivado exitosamente',
+      message: "Proveedor reactivado exitosamente",
       provider: updated,
     });
   } catch (err) {
-    if (err.code === 'P2025') {
-      return res.status(404).json({ message: 'Proveedor no encontrado' });
+    if (err.code === "P2025") {
+      return res.status(404).json({ message: "Proveedor no encontrado" });
     }
     next(err);
   }
