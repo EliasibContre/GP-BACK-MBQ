@@ -17,13 +17,13 @@ async function main() {
   const passwordHash = await bcrypt.hash('Aa12345!', 10);
   
   await prisma.user.upsert({
-    where: { email: 'eliasibcontreras018@gmail.com' },
+    where: { email: 'cmendez@mbqinc.com' },
     update: {
       passwordHash, // Actualizamos el hash por si cambiaste la semilla
       mustChangePassword: true
     },
     create: {
-      email: 'eliasibcontreras018@gmail.com',
+      email: 'cmendez@mbqinc.com',
       fullName: 'Admin Demo',
       passwordHash,
       mustChangePassword: true,
