@@ -15,6 +15,7 @@ import {
   resetPasswordCtrl,
 } from '../controllers/auth.controller.js';
 
+
 const router = Router();
 
 /**
@@ -50,7 +51,7 @@ router.post(
 router.get('/me', requireAuth, asyncHandler(meCtrl));
 
 // Cerrar sesión (borra cookie)
-router.post('/logout', asyncHandler(logoutCtrl));
+router.post('/logout', requireAuth, asyncHandler(logoutCtrl));
 
 // Cambio de contraseña (primer login o general) — requiere estar autenticado
 router.post(

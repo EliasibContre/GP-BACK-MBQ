@@ -1,129 +1,310 @@
-import { prisma } from '../config/prisma.js';
-import { sendPurchaseOrderApprovedEmail, sendPurchaseOrderRejectedEmail } from '../utils/email.js';
-import { uploadToSupabase, deleteFromSupabase, getPublicUrl } from '../config/supabase.js';
-import fs from 'fs/promises';
-import path from 'path';
+// src/controllers/purchaseOrder.controller.js
+import { prisma } from "../config/prisma.js";
+import {
+  sendPurchaseOrderApprovedEmail,
+  sendPurchaseOrderRejectedEmail,
+} from "../utils/email.js";
+import { createNotification } from "../services/notification.service.js";
+import { uploadToSupabase, deleteFromSupabase } from "../config/supabase.js";
+import path from "path";
+import { validateCfdiXml } from "../utils/cfdiValidation.js";
+import { notifyRoles } from "../services/roleAlerts.service.js";
 
-// Crear orden de compra (proveedor)
+function toLocalNoon(dateStr) {
+  // dateStr esperado: "YYYY-MM-DD"
+  if (!dateStr) return null;
+
+  const s = String(dateStr).trim();
+
+  // Si ya viene con hora/ISO (ej "2026-02-19T00:00:00-06:00"), respétalo
+  if (s.includes("T")) {
+    const d = new Date(s);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+
+  const parts = s.split("-");
+  if (parts.length !== 3) return null;
+
+  const [y, m, d] = parts.map(Number);
+  if (!y || !m || !d) return null;
+
+  // Mediodía local para evitar que por TZ se vaya al día anterior
+  return new Date(y, m - 1, d, 12, 0, 0);
+}
+
+// Crear orden de compra (proveedor) - MULTI FACTURAS
 export async function createPurchaseOrder(req, res) {
   try {
     const userId = req.user.id;
     const userEmail = req.user.email;
     const { monto, fecha, numeroOrden, rfc, observaciones } = req.body;
 
-    const provider = await prisma.provider.findFirst({
-      where: { emailContacto: userEmail, rfc, isActive: true }
-    });
-    if (!provider) return res.status(404).json({ error: 'Proveedor no encontrado o RFC no coincide' });
+    //  Validar y normalizar fecha (antes de subir archivos)
+    const issuedAt = toLocalNoon(fecha);
+    if (!issuedAt) {
+      return res.status(400).json({ error: "Fecha inválida (usa YYYY-MM-DD)" });
+    }
 
-    const existingPO = await prisma.purchaseOrder.findUnique({ where: { number: numeroOrden } });
-    if (existingPO) return res.status(400).json({ error: 'El número de orden ya existe' });
+    const provider = await prisma.provider.findFirst({
+      where: { emailContacto: userEmail, rfc, isActive: true },
+    });
+    if (!provider)
+      return res
+        .status(404)
+        .json({ error: "Proveedor no encontrado o RFC no coincide" });
+
+    const existingPO = await prisma.purchaseOrder.findUnique({
+      where: { number: numeroOrden },
+    });
+    if (existingPO)
+      return res.status(400).json({ error: "El número de orden ya existe" });
 
     // Archivos
-    const orderFile = req.files?.archivoOrden?.[0];
-    const invoicePdfFile = req.files?.archivoFacturaPdf?.[0];
-    const invoiceXmlFile = req.files?.archivoFacturaXml?.[0];
+    const orderFile = req.files?.archivoOrden?.[0] || null;
+    const invoicePdfFiles = req.files?.archivoFacturaPdf || [];
+    const invoiceXmlFiles = req.files?.archivoFacturaXml || [];
 
-    if (!orderFile) return res.status(400).json({ error: 'El PDF de la orden es obligatorio' });
-    if (!invoicePdfFile) return res.status(400).json({ error: 'El PDF de la factura es obligatorio' });
-    if (!invoiceXmlFile) return res.status(400).json({ error: 'El XML de la factura es obligatorio' });
+    if (!orderFile)
+      return res
+        .status(400)
+        .json({ error: "El PDF de la orden es obligatorio" });
+
+    // Debe haber al menos 1 PDF y 1 XML
+    if (invoicePdfFiles.length === 0)
+      return res
+        .status(400)
+        .json({ error: "Debe subir al menos un PDF de factura" });
+    if (invoiceXmlFiles.length === 0)
+      return res
+        .status(400)
+        .json({ error: "Debe subir al menos un XML de factura" });
+
+    // Deben venir pareados (mismas cantidades)
+    if (invoicePdfFiles.length !== invoiceXmlFiles.length) {
+      return res.status(400).json({
+        error:
+          "La cantidad de facturas PDF debe ser igual a la cantidad de facturas XML",
+        pdfCount: invoicePdfFiles.length,
+        xmlCount: invoiceXmlFiles.length,
+      });
+    }
+
+    //  NUEVO: Validar que los XMLs sean CFDI timbrado (antes de subir a storage)
+    {
+      const seenUuids = new Set();
+
+      for (let i = 0; i < invoiceXmlFiles.length; i++) {
+        const xmlF = invoiceXmlFiles[i];
+
+        const v = validateCfdiXml(xmlF.buffer, { requireTimbre: true });
+        if (!v.ok) {
+          return res.status(400).json({
+            error: "XML inválido (no es CFDI timbrado)",
+            detail: v.error,
+            file: xmlF.originalname,
+            index: i,
+          });
+        }
+
+        // dedupe en el mismo request
+        if (v.data?.uuid) {
+          const u = String(v.data.uuid).toUpperCase();
+          if (seenUuids.has(u)) {
+            return res.status(400).json({
+              error: "Factura XML duplicada (UUID repetido en el mismo envío)",
+              uuid: u,
+              file: xmlF.originalname,
+              index: i,
+            });
+          }
+          seenUuids.add(u);
+        }
+      }
+    }
 
     const ts = Date.now();
 
-    // Subir Orden de Compra a Supabase Storage
+    // Vamos a subir a storage primero, y si algo falla, hacemos rollback
+    const uploadedKeys = []; // { bucket, key }
+    const uploadedInvoices = []; // { pdfUrl, pdfStorageKey, xmlUrl, xmlStorageKey }
+
+    // 1) Subir Orden de Compra a Supabase Storage (purchase-orders)
     const orderFilename = `PO_${numeroOrden}_${ts}.pdf`;
     const orderPath = `${provider.id}/${orderFilename}`;
+
     let pdfUrl = null;
     let storageKey = null;
+
     try {
-      const orderUpload = await uploadToSupabase('purchase-orders', orderPath, orderFile.buffer, 'application/pdf');
+      const orderUpload = await uploadToSupabase(
+        "purchase-orders",
+        orderPath,
+        orderFile.buffer,
+        "application/pdf",
+      );
+
+      // ⚠️ Nota: esto asume que uploadToSupabase devuelve { url, path }.
+      // Si tu helper NO devuelve url, aquí quedará null (lo corregimos si hace falta).
       pdfUrl = orderUpload.url;
       storageKey = orderUpload.path;
+
+      uploadedKeys.push({ bucket: "purchase-orders", key: orderUpload.path });
     } catch (e) {
-      console.error('Error subiendo Orden de Compra a Supabase:', e.message || e);
-      return res.status(502).json({ error: 'Error subiendo archivo de orden de compra', detail: e.message || String(e) });
+      console.error(
+        "Error subiendo Orden de Compra a Supabase:",
+        e.message || e,
+      );
+      return res.status(502).json({
+        error: "Error subiendo archivo de orden de compra",
+        detail: e.message || String(e),
+      });
     }
 
-    // Subir Factura PDF a Supabase Storage
-    let invoicePdfUrl = null;
-    let invoiceStorageKey = null;
-    let invoiceXmlUrl = null;
-    let invoiceXmlStorageKey = null;
-    let invoiceUploadedAt = null;
+    // 2) Subir N facturas (PDF + XML) a Supabase Storage (invoices)
+    try {
+      for (let i = 0; i < invoicePdfFiles.length; i++) {
+        const pdfF = invoicePdfFiles[i];
+        const xmlF = invoiceXmlFiles[i];
 
-    if (invoicePdfFile) {
-      const invoicePdfFilename = `FAC_${numeroOrden}_${ts}.pdf`;
-      const invoicePdfPath = `${provider.id}/${invoicePdfFilename}`;
-      try {
-        const invoicePdfUpload = await uploadToSupabase('invoices', invoicePdfPath, invoicePdfFile.buffer, 'application/pdf');
-        invoicePdfUrl = invoicePdfUpload.url;
-        invoiceStorageKey = invoicePdfUpload.path;
-        invoiceUploadedAt = new Date();
-      } catch (e) {
-        console.error('Error subiendo Factura PDF a Supabase:', e.message || e);
-        return res.status(502).json({ error: 'Error subiendo archivo de factura (PDF)', detail: e.message || String(e) });
+        const idx = i + 1;
+
+        const pdfName = `FAC_${numeroOrden}_${ts}_${idx}.pdf`;
+        const xmlName = `FAC_${numeroOrden}_${ts}_${idx}.xml`;
+
+        const pdfPath = `${provider.id}/${pdfName}`;
+        const xmlPath = `${provider.id}/${xmlName}`;
+
+        const upPdf = await uploadToSupabase(
+          "invoices",
+          pdfPath,
+          pdfF.buffer,
+          "application/pdf",
+        );
+        uploadedKeys.push({ bucket: "invoices", key: upPdf.path });
+
+        const upXml = await uploadToSupabase(
+          "invoices",
+          xmlPath,
+          xmlF.buffer,
+          "application/xml",
+        );
+        uploadedKeys.push({ bucket: "invoices", key: upXml.path });
+
+        uploadedInvoices.push({
+          pdfUrl: upPdf.url,
+          pdfStorageKey: upPdf.path,
+          xmlUrl: upXml.url,
+          xmlStorageKey: upXml.path,
+        });
       }
-    }
+    } catch (e) {
+      console.error("Error subiendo facturas a Supabase:", e.message || e);
 
-    // Subir Factura XML a Supabase Storage
-    if (invoiceXmlFile) {
-      const invoiceXmlFilename = `FAC_${numeroOrden}_${ts}.xml`;
-      const invoiceXmlPath = `${provider.id}/${invoiceXmlFilename}`;
-      try {
-        const invoiceXmlUpload = await uploadToSupabase('invoices', invoiceXmlPath, invoiceXmlFile.buffer, 'application/xml');
-        invoiceXmlUrl = invoiceXmlUpload.url;
-        invoiceXmlStorageKey = invoiceXmlUpload.path;
-      } catch (e) {
-        console.error('Error subiendo Factura XML a Supabase:', e.message || e);
-        return res.status(502).json({ error: 'Error subiendo archivo de factura (XML)', detail: e.message || String(e) });
-      }
-    }
-
-    const purchaseOrder = await prisma.purchaseOrder.create({
-      data: {
-        number: numeroOrden,
-        providerId: provider.id,
-        status: 'DRAFT',
-        total: parseFloat(monto),
-        issuedAt: new Date(fecha),
-        obervations: observaciones || null,
-        pdfUrl,
-        storageKey,
-        invoicePdfUrl,
-        invoiceStorageKey,
-        invoiceXmlUrl,
-        invoiceXmlStorageKey,
-        invoiceUploadedAt,
-        createdById: userId
-      },
-      include: {
-        provider: { select: { businessName: true, rfc: true } }
-      }
-    });
-
-    await prisma.auditLog.create({
-      data: {
-        actorId: userId,
-        action: 'CREATE_PURCHASE_ORDER',
-        entity: 'PurchaseOrder',
-        entityId: purchaseOrder.id,
-        meta: {
-          number: numeroOrden,
-          provider: provider.businessName,
-          total: monto,
-          invoicePdf: invoiceStorageKey,
-          invoiceXml: invoiceXmlStorageKey
+      // Rollback de TODO lo subido (incluida la orden)
+      for (const k of uploadedKeys.reverse()) {
+        try {
+          await deleteFromSupabase(k.bucket, k.key);
+        } catch (er) {
+          console.warn(
+            "No se pudo eliminar en rollback:",
+            k.bucket,
+            k.key,
+            er.message || er,
+          );
         }
       }
+
+      return res.status(502).json({
+        error: "Error subiendo archivos de facturas",
+        detail: e.message || String(e),
+      });
+    }
+
+    // Compatibilidad: guardar la primera factura en los campos legacy
+    const firstInv = uploadedInvoices[0];
+    const invoiceUploadedAt = new Date();
+
+    // 3) Guardar en BD en transacción
+    const purchaseOrder = await prisma.$transaction(async (tx) => {
+      const po = await tx.purchaseOrder.create({
+        data: {
+          number: numeroOrden,
+          providerId: provider.id,
+          status: "DRAFT",
+          total: String(monto),
+          issuedAt,
+          obervations: observaciones || null,
+
+          pdfUrl,
+          storageKey,
+
+          // legacy (primera factura)
+          invoicePdfUrl: firstInv?.pdfUrl || null,
+          invoiceStorageKey: firstInv?.pdfStorageKey || null,
+          invoiceXmlUrl: firstInv?.xmlUrl || null,
+          invoiceXmlStorageKey: firstInv?.xmlStorageKey || null,
+          invoiceUploadedAt,
+
+          createdById: userId,
+        },
+        include: {
+          provider: { select: { businessName: true, rfc: true } },
+        },
+      });
+
+      // crear N registros de invoices hijas
+      await tx.purchaseOrderInvoice.createMany({
+        data: uploadedInvoices.map((inv) => ({
+          purchaseOrderId: po.id,
+          pdfUrl: inv.pdfUrl,
+          pdfStorageKey: inv.pdfStorageKey,
+          xmlUrl: inv.xmlUrl,
+          xmlStorageKey: inv.xmlStorageKey,
+        })),
+      });
+
+      // Auditoría
+      await tx.auditLog.create({
+        data: {
+          actorId: userId,
+          action: "CREATE_PURCHASE_ORDER",
+          entity: "PurchaseOrder",
+          entityId: po.id,
+          meta: {
+            number: numeroOrden,
+            provider: provider.businessName,
+            total: monto,
+            orderStorageKey: storageKey,
+            invoicesCount: uploadedInvoices.length,
+            invoices: uploadedInvoices.map((x) => ({
+              pdf: x.pdfStorageKey,
+              xml: x.xmlStorageKey,
+            })),
+          },
+        },
+      });
+
+      // devolver PO con poInvoices
+      const poFull = await tx.purchaseOrder.findUnique({
+        where: { id: po.id },
+        include: {
+          provider: { select: { businessName: true, rfc: true } },
+          poInvoices: true,
+        },
+      });
+
+      return poFull;
     });
 
-    res.status(201).json({
-      message: 'Orden de compra registrada correctamente',
-      data: purchaseOrder
+    return res.status(201).json({
+      message: "Orden de compra registrada correctamente",
+      data: purchaseOrder,
     });
   } catch (error) {
-    console.error('Error al crear orden de compra:', error);
-    res.status(500).json({ error: 'Error al registrar la orden de compra' });
+    console.error("Error al crear orden de compra:", error);
+    return res
+      .status(500)
+      .json({ error: "Error al registrar la orden de compra" });
   }
 }
 
@@ -133,61 +314,56 @@ export async function getMyPurchaseOrders(req, res) {
     const userEmail = req.user.email;
 
     const provider = await prisma.provider.findFirst({
-      where: { 
+      where: {
         emailContacto: userEmail,
-        isActive: true 
-      }
+        isActive: true,
+      },
     });
 
     if (!provider) {
-      return res.status(404).json({ error: 'Proveedor no encontrado' });
+      return res.status(404).json({ error: "Proveedor no encontrado" });
     }
+
     const orders = await prisma.purchaseOrder.findMany({
       where: { providerId: provider.id },
       include: {
         provider: {
-          select: {
-            businessName: true,
-            rfc: true
-          }
+          select: { businessName: true, rfc: true },
         },
         createdBy: {
-          select: {
-            fullName: true,
-            email: true
-          }
-        }
+          select: { fullName: true, email: true },
+        },
+        poInvoices: true,
       },
-      orderBy: { createdAt: 'desc' }
+      orderBy: { createdAt: "desc" },
     });
 
-    res.json(orders);
+    return res.json(orders);
   } catch (error) {
-    console.error('Error al obtener órdenes:', error);
-    res.status(500).json({ error: 'Error al cargar las órdenes' });
+    console.error("Error al obtener órdenes:", error);
+    return res.status(500).json({ error: "Error al cargar las órdenes" });
   }
 }
 
 // Obtener órdenes pendientes de aprobación (para aprobadores/administradores)
 export async function getPendingApprovalPurchaseOrders(req, res) {
   try {
-    const { status, limit = 50, cursor } = req.query;
-    let statuses = [];
-    if (status) {
-      statuses = String(status).split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
-    } else {
-      statuses = ['DRAFT', 'SENT'];
-    }
+    const { limit = 50, cursor } = req.query;
+
+    //  Regla: SOLO órdenes enviadas a revisión
+    const statuses = ["SENT"];
 
     const take = Math.min(Number(limit) || 50, 200);
+
     const query = {
       where: { status: { in: statuses } },
-      orderBy: { createdAt: 'desc' },
+      orderBy: { createdAt: "desc" },
       take: take + 1,
       include: {
         provider: { select: { businessName: true, rfc: true } },
-        createdBy: { select: { id: true, fullName: true, email: true } }
-      }
+        createdBy: { select: { id: true, fullName: true, email: true } },
+        poInvoices: true,
+      },
     };
     if (cursor) query.cursor = { id: Number(cursor) };
 
@@ -195,10 +371,14 @@ export async function getPendingApprovalPurchaseOrders(req, res) {
     const hasMore = rows.length > take;
     const data = rows.slice(0, take);
 
-    res.json({ data, hasMore, nextCursor: hasMore ? rows[rows.length - 1].id : null });
+    return res.json({
+      data,
+      hasMore,
+      nextCursor: hasMore ? rows[rows.length - 1].id : null,
+    });
   } catch (error) {
-    console.error('Error al cargar órdenes pendientes de aprobación:', error);
-    res.status(500).json({ error: 'Error al cargar órdenes' });
+    console.error("Error al cargar órdenes pendientes de aprobación:", error);
+    return res.status(500).json({ error: "Error al cargar órdenes" });
   }
 }
 
@@ -208,47 +388,128 @@ export async function approvePurchaseOrder(req, res) {
     const id = Number(req.params.id);
     const approverId = req.user?.id;
     const po = await prisma.purchaseOrder.findUnique({ where: { id } });
-    if (!po) return res.status(404).json({ error: 'Orden no encontrada' });
-    if (!(po.status === 'DRAFT' || po.status === 'SENT')) return res.status(400).json({ error: 'Orden no puede aprobarse en su estado actual' });
+    if (!po) return res.status(404).json({ error: "Orden no encontrada" });
+    if (po.status !== "SENT") {
+      return res
+        .status(400)
+        .json({ error: "Solo se pueden aprobar órdenes en estado SENT" });
+    }
 
     const updated = await prisma.purchaseOrder.update({
       where: { id },
-      data: { status: 'APPROVED', approvedById: approverId, approvedAt: new Date() },
-      include: { provider: true, createdBy: true }
+      data: {
+        status: "APPROVED",
+        approvedById: approverId,
+        approvedAt: new Date(),
+      },
+      include: { provider: true, createdBy: true },
     });
 
-    await prisma.auditLog.create({ data: { actorId: approverId, action: 'APPROVE_PURCHASE_ORDER', entity: 'PurchaseOrder', entityId: id } });
+    await prisma.auditLog.create({
+      data: {
+        actorId: approverId,
+        action: "APPROVE_PURCHASE_ORDER",
+        entity: "PurchaseOrder",
+        entityId: id,
+      },
+    });
+
+    try {
+      const providerFull = await prisma.provider.findFirst({
+        where: { id: provider.id },
+        select: { id: true, businessName: true, rfc: true },
+      });
+
+      const providerName =
+        providerFull?.businessName || req.user?.email || "Proveedor";
+
+      await notifyRoles({
+        roleNames: ["ADMIN", "APPROVER"],
+        type: "PO_SUBMITTED",
+        entityType: "PURCHASE_ORDER",
+        entityId: updated.id,
+        title: "Nueva orden por revisar",
+        message: `El proveedor ${providerName} subió la orden ${updated.number} y requiere revisión.`,
+        data: {
+          purchaseOrderId: updated.id,
+          number: updated.number,
+          providerId: provider.id,
+          providerName,
+          rfc: providerFull?.rfc || null,
+        },
+        sendEmail: true,
+      });
+    } catch (e) {
+      console.error("Error notificando roles por orden enviada:", e);
+    }
 
     // Crear notificación para el usuario que creó la orden (si existe)
     try {
-      const recipientUserId = updated.createdById || (updated.createdBy ? updated.createdBy.id : null);
+      const recipientUserId =
+        updated.createdById ||
+        (updated.createdBy ? updated.createdBy.id : null);
+
       if (recipientUserId) {
-        await prisma.notification.create({ data: {
+        await createNotification({
           userId: recipientUserId,
-          type: 'PO_APPROVED',
-          entityType: 'PURCHASE_ORDER',
+          type: "PO_APPROVED",
+          entityType: "PURCHASE_ORDER",
           entityId: id,
-          title: 'Orden Aprobada',
+          title: "Orden Aprobada",
           message: `Tu orden ${updated.number} ha sido aprobada.`,
-          data: { number: updated.number, total: updated.total ? String(updated.total) : null }
-        }});
+          data: {
+            number: updated.number,
+            total: updated.total ? String(updated.total) : null,
+          },
+          sendEmail: false,
+        });
       }
 
       // Enviar correo al contacto del proveedor si existe
       const providerEmail = updated.provider?.emailContacto;
-      if (providerEmail && String(process.env.MAILER_DISABLED || 'false') !== 'true') {
-        try { await sendPurchaseOrderApprovedEmail(providerEmail, { number: updated.number, total: updated.total ? String(updated.total) : '' }); } catch (e) { console.error('Error enviando email PO aprobado:', e.message); }
+      if (
+        providerEmail &&
+        String(process.env.MAILER_DISABLED || "false") !== "true"
+      ) {
+        try {
+          await sendPurchaseOrderApprovedEmail(providerEmail, {
+            number: updated.number,
+            total: updated.total ? String(updated.total) : "",
+          });
+        } catch (e) {
+          console.error("Error enviando email PO aprobado:", e.message);
+        }
       } else if (providerEmail) {
-        console.log(`[DEV] PO aprobada para ${providerEmail}: ${updated.number}`);
       }
     } catch (e) {
-      console.error('Error notificando/mandando email al aprobar PO:', e);
+      console.error("Error notificando/mandando email al aprobar PO:", e);
     }
 
-    res.json({ message: 'Orden aprobada', data: updated });
+    try {
+      const providerName = updated.provider?.businessName || "Proveedor";
+
+      await notifyRoles({
+        roleNames: ["ADMIN"],
+        type: "PO_APPROVED_ADMIN_ALERT",
+        entityType: "PURCHASE_ORDER",
+        entityId: id,
+        title: "Orden aprobada",
+        message: `La orden ${updated.number} del proveedor ${providerName} fue aprobada.`,
+        data: {
+          purchaseOrderId: updated.id,
+          number: updated.number,
+          providerName,
+        },
+        sendEmail: true,
+      });
+    } catch (e) {
+      console.error("Error notificando a admins por orden aprobada:", e);
+    }
+
+    return res.json({ message: "Orden aprobada", data: updated });
   } catch (error) {
-    console.error('Error aprobando orden:', error);
-    res.status(500).json({ error: 'Error al aprobar la orden' });
+    console.error("Error aprobando orden:", error);
+    return res.status(500).json({ error: "Error al aprobar la orden" });
   }
 }
 
@@ -258,49 +519,87 @@ export async function rejectPurchaseOrder(req, res) {
     const id = Number(req.params.id);
     const approverId = req.user?.id;
     const { reason } = req.body || {};
-    if (!reason || String(reason).trim().length < 3) return res.status(400).json({ error: 'Motivo requerido' });
+
+    if (!reason || String(reason).trim().length < 3) {
+      return res.status(400).json({ error: "Motivo requerido" });
+    }
 
     const po = await prisma.purchaseOrder.findUnique({ where: { id } });
-    if (!po) return res.status(404).json({ error: 'Orden no encontrada' });
-    if (po.status === 'CANCELLED' || po.status === 'RECEIVED') return res.status(400).json({ error: 'Orden no puede rechazarse en su estado actual' });
+    if (!po) return res.status(404).json({ error: "Orden no encontrada" });
+    if (po.status === "CANCELLED" || po.status === "RECEIVED")
+      return res
+        .status(400)
+        .json({ error: "Orden no puede rechazarse en su estado actual" });
 
     const updated = await prisma.purchaseOrder.update({
       where: { id },
-      data: { status: 'CANCELLED', obervations: (po.obervations || '') + '\nRECHAZO: ' + String(reason).trim() },
-      include: { provider: true, createdBy: true }
+      data: {
+        status: "CANCELLED",
+        obervations:
+          (po.obervations || "") + "\nRECHAZO: " + String(reason).trim(),
+      },
+      include: { provider: true, createdBy: true },
     });
 
-    await prisma.auditLog.create({ data: { actorId: approverId, action: 'REJECT_PURCHASE_ORDER', entity: 'PurchaseOrder', entityId: id, meta: { reason } } });
+    await prisma.auditLog.create({
+      data: {
+        actorId: approverId,
+        action: "REJECT_PURCHASE_ORDER",
+        entity: "PurchaseOrder",
+        entityId: id,
+        meta: { reason },
+      },
+    });
 
     // Notificar y enviar correo al proveedor/usuario creador
     try {
-      const recipientUserId = updated.createdById || (updated.createdBy ? updated.createdBy.id : null);
+      const recipientUserId =
+        updated.createdById ||
+        (updated.createdBy ? updated.createdBy.id : null);
+
       if (recipientUserId) {
-        await prisma.notification.create({ data: {
+        await createNotification({
           userId: recipientUserId,
-          type: 'PO_REJECTED',
-          entityType: 'PURCHASE_ORDER',
+          type: "PO_REJECTED",
+          entityType: "PURCHASE_ORDER",
           entityId: id,
-          title: 'Orden Rechazada',
+          title: "Orden Rechazada",
           message: `Tu orden ${updated.number} ha sido rechazada. Motivo: ${reason}`,
-          data: { number: updated.number, reason }
-        }});
+          data: {
+            number: updated.number,
+            reason,
+          },
+          sendEmail: false,
+        });
       }
 
       const providerEmail = updated.provider?.emailContacto;
-      if (providerEmail && String(process.env.MAILER_DISABLED || 'false') !== 'true') {
-        try { await sendPurchaseOrderRejectedEmail(providerEmail, { number: updated.number, total: updated.total ? String(updated.total) : '' }, reason); } catch (e) { console.error('Error enviando email PO rechazado:', e.message); }
+      if (
+        providerEmail &&
+        String(process.env.MAILER_DISABLED || "false") !== "true"
+      ) {
+        try {
+          await sendPurchaseOrderRejectedEmail(
+            providerEmail,
+            {
+              number: updated.number,
+              total: updated.total ? String(updated.total) : "",
+            },
+            reason,
+          );
+        } catch (e) {
+          console.error("Error enviando email PO rechazado:", e.message);
+        }
       } else if (providerEmail) {
-        console.log(`[DEV] PO rechazada para ${providerEmail}: ${updated.number} - motivo: ${reason}`);
       }
     } catch (e) {
-      console.error('Error notificando/mandando email al rechazar PO:', e);
+      console.error("Error notificando/mandando email al rechazar PO:", e);
     }
 
-    res.json({ message: 'Orden rechazada', data: updated });
+    return res.json({ message: "Orden rechazada", data: updated });
   } catch (error) {
-    console.error('Error rechazando orden:', error);
-    res.status(500).json({ error: 'Error al rechazar la orden' });
+    console.error("Error rechazando orden:", error);
+    return res.status(500).json({ error: "Error al rechazar la orden" });
   }
 }
 
@@ -310,15 +609,32 @@ export async function markReceivedPurchaseOrder(req, res) {
     const id = Number(req.params.id);
     const userId = req.user?.id;
     const po = await prisma.purchaseOrder.findUnique({ where: { id } });
-    if (!po) return res.status(404).json({ error: 'Orden no encontrada' });
-    if (po.status !== 'APPROVED' && po.status !== 'SENT') return res.status(400).json({ error: 'Orden no puede marcarse como recibida en su estado actual' });
+    if (!po) return res.status(404).json({ error: "Orden no encontrada" });
 
-    const updated = await prisma.purchaseOrder.update({ where: { id }, data: { status: 'RECEIVED', receivedAt: new Date() } });
-    await prisma.auditLog.create({ data: { actorId: userId, action: 'MARK_RECEIVED_PURCHASE_ORDER', entity: 'PurchaseOrder', entityId: id } });
-    res.json({ message: 'Orden marcada como recibida', data: updated });
+    if (po.status !== "APPROVED" && po.status !== "SENT") {
+      return res.status(400).json({
+        error: "Orden no puede marcarse como recibida en su estado actual",
+      });
+    }
+
+    const updated = await prisma.purchaseOrder.update({
+      where: { id },
+      data: { status: "RECEIVED", receivedAt: new Date() },
+    });
+
+    await prisma.auditLog.create({
+      data: {
+        actorId: userId,
+        action: "MARK_RECEIVED_PURCHASE_ORDER",
+        entity: "PurchaseOrder",
+        entityId: id,
+      },
+    });
+
+    return res.json({ message: "Orden marcada como recibida", data: updated });
   } catch (error) {
-    console.error('Error marcando recibida orden:', error);
-    res.status(500).json({ error: 'Error al marcar como recibida' });
+    console.error("Error marcando recibida orden:", error);
+    return res.status(500).json({ error: "Error al marcar como recibida" });
   }
 }
 
@@ -327,12 +643,29 @@ export async function listPurchaseOrders(req, res) {
   try {
     const { status, providerId, limit = 50, offset = 0 } = req.query;
 
-    const where = {};
-    if (status) {
-      where.status = status.toUpperCase();
+    const roles = (req.user?.roles || []).map((r) =>
+      typeof r === "string"
+        ? r.toUpperCase()
+        : String(r?.name || "").toUpperCase(),
+    );
+
+    const isAdmin = roles.includes("ADMIN");
+    const isApprover = roles.includes("APPROVER");
+
+    if (!isAdmin && !isApprover) {
+      return res
+        .status(403)
+        .json({ error: "No autorizado para listar órdenes" });
     }
+
+    const where = {};
+
+    if (status) {
+      where.status = String(status).toUpperCase();
+    }
+
     if (providerId) {
-      where.providerId = parseInt(providerId);
+      where.providerId = parseInt(providerId, 10);
     }
 
     const [purchaseOrders, total] = await Promise.all([
@@ -344,29 +677,32 @@ export async function listPurchaseOrders(req, res) {
               id: true,
               businessName: true,
               rfc: true,
-              emailContacto: true
-            }
-          }
+              emailContacto: true,
+            },
+          },
         },
-        orderBy: { createdAt: 'desc' },
-        take: parseInt(limit),
-        skip: parseInt(offset)
+        orderBy: { createdAt: "desc" },
+        take: parseInt(limit, 10),
+        skip: parseInt(offset, 10),
       }),
-      prisma.purchaseOrder.count({ where })
+      prisma.purchaseOrder.count({ where }),
     ]);
 
-    res.json({
+    return res.json({
       purchaseOrders,
       pagination: {
         total,
-        limit: parseInt(limit),
-        offset: parseInt(offset),
-        hasMore: parseInt(offset) + parseInt(limit) < total
-      }
+        limit: parseInt(limit, 10),
+        offset: parseInt(offset, 10),
+        hasMore: parseInt(offset, 10) + parseInt(limit, 10) < total,
+      },
     });
   } catch (error) {
-    console.error('Error listando órdenes:', error);
-    res.status(500).json({ error: 'Error al listar órdenes', detail: error.message });
+    console.error("Error listando órdenes:", error);
+    return res.status(500).json({
+      error: "Error al listar órdenes",
+      detail: error.message,
+    });
   }
 }
 
@@ -374,29 +710,44 @@ export async function listPurchaseOrders(req, res) {
 export async function listApprovedForSessionProvider(req, res) {
   try {
     const roles = (req.user && req.user.roles) || [];
-    const isProviderRole = roles.some(r => String(r.name).toUpperCase() === 'PROVIDER');
+    const isProviderRole = roles.some(
+      (r) => String(r.name).toUpperCase() === "PROVIDER",
+    );
+
     if (!isProviderRole) {
-      return res.status(403).json({ error: 'Solo disponible para rol PROVIDER' });
+      return res
+        .status(403)
+        .json({ error: "Solo disponible para rol PROVIDER" });
     }
 
     const provider = await prisma.provider.findFirst({
       where: { emailContacto: req.user.email, isActive: true, deletedAt: null },
-      select: { id: true }
+      select: { id: true },
     });
+
     if (!provider) {
       return res.json({ purchaseOrders: [] });
     }
 
     const purchaseOrders = await prisma.purchaseOrder.findMany({
-      where: { providerId: provider.id, status: 'APPROVED' },
-      orderBy: { createdAt: 'desc' },
-      select: { id: true, number: true, total: true, status: true, providerId: true }
+      where: { providerId: provider.id, status: "APPROVED" },
+      orderBy: { createdAt: "desc" },
+      select: {
+        id: true,
+        number: true,
+        total: true,
+        status: true,
+        providerId: true,
+      },
     });
 
     return res.json({ purchaseOrders });
   } catch (error) {
-    console.error('Error listApprovedForSessionProvider:', error);
-    res.status(500).json({ error: 'Error al listar órdenes aprobadas del proveedor', detail: error.message });
+    console.error("Error listApprovedForSessionProvider:", error);
+    return res.status(500).json({
+      error: "Error al listar órdenes aprobadas del proveedor",
+      detail: error.message,
+    });
   }
 }
 
@@ -404,36 +755,663 @@ export async function listApprovedForSessionProvider(req, res) {
 export async function listApprovedUnpaidPurchaseOrders(req, res) {
   try {
     const { providerId, limit = 100, offset = 0 } = req.query;
+
     const where = {
-      status: 'APPROVED',
-      NOT: { payments: { some: {} } }
+      status: "APPROVED",
+      NOT: { payments: { some: {} } },
     };
+
     if (providerId) where.providerId = parseInt(providerId);
 
     const [purchaseOrders, total] = await Promise.all([
       prisma.purchaseOrder.findMany({
         where,
         include: {
-          provider: { select: { id: true, businessName: true, emailContacto: true } }
+          provider: {
+            select: { id: true, businessName: true, emailContacto: true },
+          },
         },
-        orderBy: { createdAt: 'desc' },
+        orderBy: { createdAt: "desc" },
         take: parseInt(limit),
-        skip: parseInt(offset)
+        skip: parseInt(offset),
       }),
-      prisma.purchaseOrder.count({ where })
+      prisma.purchaseOrder.count({ where }),
     ]);
 
-    res.json({
+    return res.json({
       purchaseOrders,
       pagination: {
         total,
         limit: parseInt(limit),
         offset: parseInt(offset),
-        hasMore: parseInt(offset) + parseInt(limit) < total
-      }
+        hasMore: parseInt(offset) + parseInt(limit) < total,
+      },
     });
   } catch (error) {
-    console.error('Error listApprovedUnpaidPurchaseOrders:', error);
-    res.status(500).json({ error: 'Error al listar órdenes aprobadas sin pago', detail: error.message });
+    console.error("Error listApprovedUnpaidPurchaseOrders:", error);
+    return res.status(500).json({
+      error: "Error al listar órdenes aprobadas sin pago",
+      detail: error.message,
+    });
+  }
+}
+
+export async function submitPurchaseOrder(req, res) {
+  try {
+    const id = Number(req.params.id);
+    const userId = req.user?.id;
+    const userEmail = req.user?.email;
+
+    const provider = await prisma.provider.findFirst({
+      where: { emailContacto: userEmail, isActive: true, deletedAt: null },
+      select: { id: true, businessName: true, rfc: true },
+    });
+    if (!provider) {
+      return res.status(404).json({ error: "Proveedor no encontrado" });
+    }
+
+    const po = await prisma.purchaseOrder.findUnique({ where: { id } });
+    if (!po) {
+      return res.status(404).json({ error: "Orden no encontrada" });
+    }
+
+    if (po.providerId !== provider.id) {
+      return res.status(403).json({ error: "No autorizado" });
+    }
+
+    if (po.status !== "DRAFT") {
+      return res
+        .status(400)
+        .json({ error: "Solo se pueden enviar órdenes en DRAFT" });
+    }
+
+    const updated = await prisma.purchaseOrder.update({
+      where: { id },
+      data: { status: "SENT" },
+    });
+
+    await prisma.auditLog.create({
+      data: {
+        actorId: userId,
+        action: "SUBMIT_PURCHASE_ORDER",
+        entity: "PurchaseOrder",
+        entityId: id,
+        meta: { from: "DRAFT", to: "SENT" },
+      },
+    });
+
+    //  NUEVO: avisar a ADMIN y APPROVER que hay una orden por revisar
+    try {
+      const providerName =
+        provider.businessName || req.user?.email || "Proveedor";
+
+      await notifyRoles({
+        roleNames: ["ADMIN", "APPROVER"],
+        type: "PO_SUBMITTED",
+        entityType: "PURCHASE_ORDER",
+        entityId: updated.id,
+        title: "Nueva orden por revisar",
+        message: `El proveedor ${providerName} subió la orden ${updated.number} y requiere revisión.`,
+        data: {
+          purchaseOrderId: updated.id,
+          number: updated.number,
+          providerId: provider.id,
+          providerName,
+          rfc: provider.rfc || null,
+        },
+        sendEmail: true,
+      });
+    } catch (e) {
+      console.error("Error notificando roles por orden enviada:", e);
+    }
+
+    return res.json({
+      message: "Orden enviada a revisión correctamente",
+      data: updated,
+    });
+  } catch (error) {
+    console.error("Error submitPurchaseOrder:", error);
+    return res.status(500).json({ error: "Error al enviar orden" });
+  }
+}
+
+export async function deletePurchaseOrder(req, res) {
+  try {
+    const id = Number(req.params.id);
+    const userId = req.user?.id;
+    const userEmail = req.user?.email;
+
+    const provider = await prisma.provider.findFirst({
+      where: { emailContacto: userEmail, isActive: true, deletedAt: null },
+      select: { id: true, businessName: true },
+    });
+
+    if (!provider)
+      return res.status(404).json({ error: "Proveedor no encontrado" });
+
+    const po = await prisma.purchaseOrder.findUnique({
+      where: { id },
+      include: { poInvoices: true },
+    });
+
+    if (!po) return res.status(404).json({ error: "Orden no encontrada" });
+
+    if (po.providerId !== provider.id) {
+      return res.status(403).json({ error: "No autorizado" });
+    }
+
+    if (po.status !== "DRAFT") {
+      return res
+        .status(400)
+        .json({ error: "Solo se pueden eliminar órdenes en DRAFT" });
+    }
+
+    // Recolectar keys para borrar en storage (best effort)
+    const keysPurchaseOrders = [];
+    const keysInvoices = [];
+
+    if (po.storageKey) keysPurchaseOrders.push(po.storageKey);
+
+    // legacy invoice fields (por compat)
+    if (po.invoiceStorageKey) keysInvoices.push(po.invoiceStorageKey);
+    if (po.invoiceXmlStorageKey) keysInvoices.push(po.invoiceXmlStorageKey);
+
+    // hijas
+    for (const inv of po.poInvoices || []) {
+      if (inv.pdfStorageKey) keysInvoices.push(inv.pdfStorageKey);
+      if (inv.xmlStorageKey) keysInvoices.push(inv.xmlStorageKey);
+    }
+
+    // Dedup
+    const uniq = (arr) => [...new Set(arr.filter(Boolean))];
+
+    await prisma.$transaction(async (tx) => {
+      await tx.purchaseOrderInvoice.deleteMany({
+        where: { purchaseOrderId: id },
+      });
+      await tx.purchaseOrder.delete({ where: { id } });
+
+      await tx.auditLog.create({
+        data: {
+          actorId: userId,
+          action: "DELETE_PURCHASE_ORDER",
+          entity: "PurchaseOrder",
+          entityId: id,
+          meta: {
+            number: po.number,
+            provider: provider.businessName,
+            deletedStorage: {
+              purchaseOrders: uniq(keysPurchaseOrders),
+              invoices: uniq(keysInvoices),
+            },
+          },
+        },
+      });
+    });
+
+    // Best-effort delete from storage (no revierte BD si falla storage)
+    for (const key of uniq(keysPurchaseOrders)) {
+      try {
+        await deleteFromSupabase("purchase-orders", key);
+      } catch (e) {
+        console.warn(
+          "No se pudo borrar archivo de purchase-orders:",
+          key,
+          e.message || e,
+        );
+      }
+    }
+
+    for (const key of uniq(keysInvoices)) {
+      try {
+        await deleteFromSupabase("invoices", key);
+      } catch (e) {
+        console.warn(
+          "No se pudo borrar archivo de invoices:",
+          key,
+          e.message || e,
+        );
+      }
+    }
+
+    return res.json({ message: "Orden eliminada correctamente" });
+  } catch (error) {
+    console.error("Error deletePurchaseOrder:", error);
+    return res.status(500).json({ error: "Error al eliminar orden" });
+  }
+}
+
+export async function updatePurchaseOrder(req, res) {
+  try {
+    const id = Number(req.params.id);
+    const userId = req.user?.id;
+    const userEmail = req.user?.email;
+    const {
+      monto,
+      fecha,
+      observaciones,
+      ocPdfRemoved,
+      removedInvoicePdfNames,
+      removedInvoiceXmlNames,
+    } = req.body || {};
+
+    let issuedAt = null;
+    if (fecha) {
+      issuedAt = toLocalNoon(fecha);
+      if (!issuedAt) {
+        return res
+          .status(400)
+          .json({ error: "Fecha inválida (usa YYYY-MM-DD)" });
+      }
+    }
+
+    const provider = await prisma.provider.findFirst({
+      where: { emailContacto: userEmail, isActive: true, deletedAt: null },
+      select: { id: true, businessName: true },
+    });
+
+    if (!provider) {
+      return res.status(404).json({ error: "Proveedor no encontrado" });
+    }
+
+    const po = await prisma.purchaseOrder.findUnique({
+      where: { id },
+      include: {
+        poInvoices: {
+          orderBy: { id: "asc" },
+        },
+      },
+    });
+
+    if (!po) {
+      return res.status(404).json({ error: "Orden no encontrada" });
+    }
+
+    if (po.providerId !== provider.id) {
+      return res.status(403).json({ error: "No autorizado" });
+    }
+
+    if (po.status !== "DRAFT") {
+      return res
+        .status(400)
+        .json({ error: "Solo se pueden editar órdenes en DRAFT" });
+    }
+
+    const orderFile = req.files?.archivoOrden?.[0] || null;
+    const invoicePdfFiles = req.files?.archivoFacturaPdf || [];
+    const invoiceXmlFiles = req.files?.archivoFacturaXml || [];
+
+    const removeOrder = String(ocPdfRemoved || "").toLowerCase() === "true";
+
+    const parseJsonArray = (value) => {
+      if (!value) return [];
+      if (Array.isArray(value)) return value.filter(Boolean).map(String);
+      try {
+        const parsed = JSON.parse(value);
+        return Array.isArray(parsed) ? parsed.filter(Boolean).map(String) : [];
+      } catch {
+        return [];
+      }
+    };
+
+    const removedPdfNames = parseJsonArray(removedInvoicePdfNames);
+    const removedXmlNames = parseJsonArray(removedInvoiceXmlNames);
+
+    const hasInvoiceRemovals =
+      removedPdfNames.length > 0 || removedXmlNames.length > 0;
+
+    const hasNewInvoiceFiles =
+      invoicePdfFiles.length > 0 || invoiceXmlFiles.length > 0;
+
+    const wantsMutateInvoices = hasInvoiceRemovals || hasNewInvoiceFiles;
+
+    const basenameNoExt = (v = "") => {
+      const raw =
+        String(v || "")
+          .split("?")[0]
+          .split("#")[0]
+          .split("/")
+          .pop() || "";
+      return raw
+        .replace(/\.[^.]+$/, "")
+        .trim()
+        .toUpperCase();
+    };
+
+    const nameOnly = (v = "") =>
+      String(v || "")
+        .split("?")[0]
+        .split("#")[0]
+        .split("/")
+        .pop() || "";
+
+    const removedPdfSet = new Set(
+      removedPdfNames.map((x) => basenameNoExt(x)).filter(Boolean),
+    );
+    const removedXmlSet = new Set(
+      removedXmlNames.map((x) => basenameNoExt(x)).filter(Boolean),
+    );
+
+    // Si manda nuevas facturas, deben venir pareadas
+    if (hasNewInvoiceFiles) {
+      if (invoicePdfFiles.length === 0) {
+        return res
+          .status(400)
+          .json({ error: "Debe subir al menos un PDF de factura" });
+      }
+      if (invoiceXmlFiles.length === 0) {
+        return res
+          .status(400)
+          .json({ error: "Debe subir al menos un XML de factura" });
+      }
+      if (invoicePdfFiles.length !== invoiceXmlFiles.length) {
+        return res.status(400).json({
+          error:
+            "La cantidad de facturas PDF debe ser igual a la cantidad de facturas XML",
+          pdfCount: invoicePdfFiles.length,
+          xmlCount: invoiceXmlFiles.length,
+        });
+      }
+
+      // Validar XMLs nuevos
+      const seenUuids = new Set();
+      for (let i = 0; i < invoiceXmlFiles.length; i++) {
+        const xmlF = invoiceXmlFiles[i];
+
+        const v = validateCfdiXml(xmlF.buffer, { requireTimbre: true });
+        if (!v.ok) {
+          return res.status(400).json({
+            error: "XML inválido (no es CFDI timbrado)",
+            detail: v.error,
+            file: xmlF.originalname,
+            index: i,
+          });
+        }
+
+        if (v.data?.uuid) {
+          const u = String(v.data.uuid).toUpperCase();
+          if (seenUuids.has(u)) {
+            return res.status(400).json({
+              error: "Factura XML duplicada (UUID repetido en el mismo envío)",
+              uuid: u,
+              file: xmlF.originalname,
+              index: i,
+            });
+          }
+          seenUuids.add(u);
+        }
+      }
+    }
+
+    // La orden no puede quedarse sin PDF
+    if (removeOrder && !orderFile) {
+      return res.status(400).json({
+        error: "Si eliminas el PDF actual de la orden, debes subir uno nuevo",
+      });
+    }
+
+    const ts = Date.now();
+
+    // Subidas nuevas para rollback
+    const uploadedKeys = []; // { bucket, key }
+    let newOrder = null; // { url, path }
+    const newInvoices = []; // [{ pdfUrl, pdfStorageKey, xmlUrl, xmlStorageKey }]
+
+    // 1) Subir nuevo PDF de orden si viene
+    if (orderFile) {
+      const orderFilename = `PO_${po.number}_${ts}.pdf`;
+      const orderPath = `${provider.id}/${orderFilename}`;
+
+      try {
+        const up = await uploadToSupabase(
+          "purchase-orders",
+          orderPath,
+          orderFile.buffer,
+          "application/pdf",
+        );
+        newOrder = { url: up.url, path: up.path };
+        uploadedKeys.push({ bucket: "purchase-orders", key: up.path });
+      } catch (e) {
+        console.error("Error subiendo nueva Orden a Supabase:", e.message || e);
+        return res.status(502).json({
+          error: "Error subiendo nuevo PDF de orden",
+          detail: e.message || String(e),
+        });
+      }
+    }
+
+    // 2) Subir nuevas facturas si vienen
+    if (hasNewInvoiceFiles) {
+      try {
+        for (let i = 0; i < invoicePdfFiles.length; i++) {
+          const pdfF = invoicePdfFiles[i];
+          const xmlF = invoiceXmlFiles[i];
+          const idx = i + 1;
+
+          const pdfName = `FAC_${po.number}_${ts}_${idx}.pdf`;
+          const xmlName = `FAC_${po.number}_${ts}_${idx}.xml`;
+          const pdfPath = `${provider.id}/${pdfName}`;
+          const xmlPath = `${provider.id}/${xmlName}`;
+
+          const upPdf = await uploadToSupabase(
+            "invoices",
+            pdfPath,
+            pdfF.buffer,
+            "application/pdf",
+          );
+          uploadedKeys.push({ bucket: "invoices", key: upPdf.path });
+
+          const upXml = await uploadToSupabase(
+            "invoices",
+            xmlPath,
+            xmlF.buffer,
+            "application/xml",
+          );
+          uploadedKeys.push({ bucket: "invoices", key: upXml.path });
+
+          newInvoices.push({
+            pdfUrl: upPdf.url,
+            pdfStorageKey: upPdf.path,
+            xmlUrl: upXml.url,
+            xmlStorageKey: upXml.path,
+          });
+        }
+      } catch (e) {
+        console.error(
+          "Error subiendo nuevas facturas a Supabase:",
+          e.message || e,
+        );
+
+        for (const k of uploadedKeys.reverse()) {
+          try {
+            await deleteFromSupabase(k.bucket, k.key);
+          } catch (er) {
+            console.warn(
+              "No se pudo eliminar en rollback (update):",
+              k.bucket,
+              k.key,
+              er.message || er,
+            );
+          }
+        }
+
+        return res.status(502).json({
+          error: "Error subiendo nuevas facturas",
+          detail: e.message || String(e),
+        });
+      }
+    }
+
+    // 3) Determinar qué invoices se quedan, cuáles se eliminan y cuáles se agregan
+    const keptInvoices = [];
+    const removedInvoiceRecords = [];
+
+    for (const inv of po.poInvoices || []) {
+      const pdfBase = basenameNoExt(inv.pdfStorageKey || inv.pdfUrl || "");
+      const xmlBase = basenameNoExt(inv.xmlStorageKey || inv.xmlUrl || "");
+
+      const shouldRemove =
+        removedPdfSet.has(pdfBase) ||
+        removedXmlSet.has(xmlBase) ||
+        removedPdfSet.has(
+          basenameNoExt(nameOnly(inv.pdfStorageKey || inv.pdfUrl || "")),
+        ) ||
+        removedXmlSet.has(
+          basenameNoExt(nameOnly(inv.xmlStorageKey || inv.xmlUrl || "")),
+        );
+
+      if (shouldRemove) {
+        removedInvoiceRecords.push(inv);
+      } else {
+        keptInvoices.push(inv);
+      }
+    }
+
+    const finalInvoices = [
+      ...keptInvoices.map((inv) => ({
+        pdfUrl: inv.pdfUrl,
+        pdfStorageKey: inv.pdfStorageKey,
+        xmlUrl: inv.xmlUrl,
+        xmlStorageKey: inv.xmlStorageKey,
+      })),
+      ...newInvoices,
+    ];
+
+    if (wantsMutateInvoices && finalInvoices.length === 0) {
+      return res.status(400).json({
+        error:
+          "La orden debe conservar al menos una factura PDF/XML después de los cambios",
+      });
+    }
+
+    const oldOrderKey = po.storageKey;
+    const invoiceKeysToDelete = [];
+
+    for (const inv of removedInvoiceRecords) {
+      if (inv.pdfStorageKey) invoiceKeysToDelete.push(inv.pdfStorageKey);
+      if (inv.xmlStorageKey) invoiceKeysToDelete.push(inv.xmlStorageKey);
+    }
+
+    const uniq = (arr) => [...new Set((arr || []).filter(Boolean))];
+
+    // 4) Guardar cambios en BD
+    const updated = await prisma.$transaction(async (tx) => {
+      const data = {};
+
+      if (monto != null && String(monto).trim() !== "") {
+        data.total = String(monto);
+      }
+      if (issuedAt) {
+        data.issuedAt = issuedAt;
+      }
+      if (observaciones !== undefined) {
+        data.obervations = observaciones || null;
+      }
+
+      if (newOrder) {
+        data.pdfUrl = newOrder.url;
+        data.storageKey = newOrder.path;
+      }
+
+      if (wantsMutateInvoices) {
+        const firstInv = finalInvoices[0] || null;
+
+        data.invoicePdfUrl = firstInv?.pdfUrl || null;
+        data.invoiceStorageKey = firstInv?.pdfStorageKey || null;
+        data.invoiceXmlUrl = firstInv?.xmlUrl || null;
+        data.invoiceXmlStorageKey = firstInv?.xmlStorageKey || null;
+        data.invoiceUploadedAt = firstInv ? new Date() : null;
+
+        await tx.purchaseOrderInvoice.deleteMany({
+          where: { purchaseOrderId: id },
+        });
+
+        if (finalInvoices.length > 0) {
+          await tx.purchaseOrderInvoice.createMany({
+            data: finalInvoices.map((inv) => ({
+              purchaseOrderId: id,
+              pdfUrl: inv.pdfUrl,
+              pdfStorageKey: inv.pdfStorageKey,
+              xmlUrl: inv.xmlUrl,
+              xmlStorageKey: inv.xmlStorageKey,
+            })),
+          });
+        }
+      }
+
+      const poUp = await tx.purchaseOrder.update({
+        where: { id },
+        data,
+        include: {
+          provider: { select: { businessName: true, rfc: true } },
+          poInvoices: true,
+        },
+      });
+
+      await tx.auditLog.create({
+        data: {
+          actorId: userId,
+          action: "UPDATE_PURCHASE_ORDER",
+          entity: "PurchaseOrder",
+          entityId: id,
+          meta: {
+            number: po.number,
+            changed: {
+              fields: {
+                monto: monto != null ? String(monto) : undefined,
+                fecha: fecha || undefined,
+                observaciones:
+                  observaciones !== undefined
+                    ? observaciones || null
+                    : undefined,
+              },
+              orderFileReplaced: Boolean(newOrder),
+              orderMarkedRemoved: removeOrder,
+              removedInvoicePdfNames: removedPdfNames,
+              removedInvoiceXmlNames: removedXmlNames,
+              invoicesAddedCount: newInvoices.length,
+              invoicesRemovedCount: removedInvoiceRecords.length,
+              invoicesFinalCount: finalInvoices.length,
+              newOrderKey: newOrder?.path || null,
+            },
+          },
+        },
+      });
+
+      return poUp;
+    });
+
+    // 5) Limpieza best-effort en storage
+    if (newOrder && oldOrderKey) {
+      try {
+        await deleteFromSupabase("purchase-orders", oldOrderKey);
+      } catch (e) {
+        console.warn(
+          "No se pudo borrar orden anterior:",
+          oldOrderKey,
+          e.message || e,
+        );
+      }
+    }
+
+    for (const key of uniq(invoiceKeysToDelete)) {
+      try {
+        await deleteFromSupabase("invoices", key);
+      } catch (e) {
+        console.warn(
+          "No se pudo borrar factura anterior:",
+          key,
+          e.message || e,
+        );
+      }
+    }
+
+    return res.json({
+      message: "Orden actualizada correctamente",
+      data: updated,
+    });
+  } catch (error) {
+    console.error("Error updatePurchaseOrder:", error);
+    return res.status(500).json({ error: "Error al actualizar la orden" });
   }
 }

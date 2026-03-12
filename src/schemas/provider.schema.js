@@ -14,8 +14,8 @@ export const createProviderSchema = z.object({
     clabe: z.string().trim()
       .optional()
       .refine(
-        val => !val || val === '' || /^\d{18}$/.test(val),
-        'CLABE debe tener 18 dígitos si se proporciona'
+        val => !val || val === '' || /^\d{18,21}$/.test(val),
+        'CLABE o cuenta bancaria debe tener 18-21 dígitos si se proporciona'
       ),
     personType: z.enum(['FISICA','MORAL']).optional(),
     tipoProveedor: z.enum(['fisica','moral']).optional() // soporte para payload frontend existente
@@ -35,8 +35,8 @@ export const updateProviderSchema = z.object({
     clabe: z.string()
       .optional()
       .refine(
-        val => !val || val === '' || /^\d{18}$/.test(val),
-        'CLABE debe tener 18 dígitos si se proporciona'
+        val => !val || val === '' || /^\d{18,21}$/.test(val),
+        'CLABE o cuenta bancaria debe tener 18-21 dígitos si se proporciona'
       ),
       newPassword: z.string().min(8, 'La nueva contraseña debe tener al menos 8 caracteres').optional()
   })
@@ -60,8 +60,8 @@ export const updateMyProviderSchema = z.object({
     clabe: z.string()
       .optional()
       .refine(
-        val => !val || val === '' || /^\d{18}$/.test(val),
-        'CLABE debe tener 18 dígitos si se proporciona'
+        val => !val || val === '' || /^\d{18,21}$/.test(val),
+        'CLABE o cuenta bancaria debe tener 18-21 dígitos si se proporciona'
       ),
     bankName: z.string().min(3).optional(),
     bankAccountId: z.number().optional()

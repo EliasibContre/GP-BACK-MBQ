@@ -1,36 +1,89 @@
-import { prisma } from '../config/prisma.js';
-import { uploadToSupabase, deleteFromSupabase, getPublicUrl } from '../config/supabase.js';
-import fs from 'fs/promises';
-import path from 'path';
+// src/controllers/document.controller.js
+import { prisma } from "../config/prisma.js";
+import { uploadToSupabase, deleteFromSupabase, getSignedUrl } from "../config/supabase.js";
+import { notifyRoles } from "../services/roleAlerts.service.js";
+import { logAudit } from "../utils/audit.js";
+import { detectContractSignature } from "../utils/contractSignatureDetector.js";
+
+const DOCS_BUCKET = process.env.PROVIDER_DOCS_BUCKET || "provider-documents";
+const SIGNED_URL_EXPIRES = Number(process.env.SIGNED_URL_EXPIRES || 3600);
+
+// límites (ajusta si quieres)
+const MAX_DOC_PDF_MB = Number(process.env.MAX_DOC_PDF_MB || 30);
+const MAX_DOC_PDF_BYTES = Math.floor(MAX_DOC_PDF_MB * 1024 * 1024);
+
+// Helpers
+function safeUpper(s) {
+  return String(s || "").trim().toUpperCase();
+}
+function getExt(name = "") {
+  const m = String(name || "").toLowerCase().match(/\.([a-z0-9]+)$/);
+  return m ? m[1] : "";
+}
+function isPdfFile(file) {
+  const ext = getExt(file?.originalname);
+  const mt = String(file?.mimetype || "").toLowerCase();
+  return mt === "application/pdf" || ext === "pdf";
+}
+function assertFileSize(file, maxBytes, label) {
+  const sz = Number(file?.size || 0);
+  if (!sz) throw new Error(`Archivo inválido (${label})`);
+  if (sz > maxBytes) throw new Error(`El archivo ${label} excede el límite (${Math.ceil(maxBytes / (1024 * 1024))}MB)`);
+}
+
+/**
+ *  StorageKey determinístico y fijo (SOLO PDF)
+ * Un documento por tipo: siempre sobrescribe el mismo path.
+ * Ej: 123/INE.pdf  |  123/CSF.pdf
+ */
+function buildDocStorageKey(providerId, docTypeCode) {
+  const code = safeUpper(docTypeCode) || "DOC";
+  return `${providerId}/${code}.pdf`;
+}
+
+async function attachSignedUrlsToDocuments(providerDocuments) {
+  const docs = providerDocuments || [];
+  const out = [];
+
+  for (const d of docs) {
+    let fileUrl = null;
+    let canDownload = false;
+
+    if (d?.storageKey) {
+      try {
+        fileUrl = await getSignedUrl(DOCS_BUCKET, d.storageKey, SIGNED_URL_EXPIRES);
+        canDownload = Boolean(fileUrl);
+      } catch {
+        fileUrl = null;
+        canDownload = false;
+      }
+    }
+
+    out.push({ ...d, fileUrl, canDownload });
+  }
+
+  return out;
+}
 
 // Obtener tipos de documento según tipo de persona
 export async function getDocumentTypes(req, res) {
   try {
     const { personType } = req.query;
-    console.log('GET /api/documents/types personType:', personType);
 
-
-    if (!personType || !['FISICA', 'MORAL'].includes(personType)) {
-    console.error(' Tipo de persona inválido:', personType);
-      return res.status(400).json({ 
-        error: 'Tipo de persona inválido. Debe ser FISICA o MORAL' 
-      });
+    if (!personType || !["FISICA", "MORAL"].includes(personType)) {
+      console.error(" Tipo de persona inválido:", personType);
+      return res.status(400).json({ error: "Tipo de persona inválido. Debe ser FISICA o MORAL" });
     }
 
     const documentTypes = await prisma.documentType.findMany({
-      where: {
-        requiredFor: {
-          has: personType
-        }
-      },
-      orderBy: { name: 'asc' }
+      where: { requiredFor: { has: personType } },
+      orderBy: { name: "asc" },
     });
 
-    console.log('Documentos encontrados:', documentTypes.length);
-    res.json(documentTypes);
+    return res.json(documentTypes);
   } catch (error) {
-    console.error('Error al obtener tipos de documento:', error);
-    res.status(500).json({ error: 'Error al cargar tipos de documento' });
+    console.error("Error al obtener tipos de documento:", error);
+    return res.status(500).json({ error: "Error al cargar tipos de documento" });
   }
 }
 
@@ -39,173 +92,277 @@ export async function getMyDocuments(req, res) {
   try {
     const userEmail = req.user.email;
 
-    // Buscar proveedor por email
     const provider = await prisma.provider.findFirst({
-      where: { 
-        emailContacto: userEmail,
-        isActive: true 
-      },
+      where: { emailContacto: userEmail, isActive: true },
       include: {
         documents: {
           include: {
             documentType: true,
-            uploadedBy: {
-              select: {
-                fullName: true,
-                email: true
-              }
-            },
-            reviewedBy: {
-              select: {
-                fullName: true,
-                email: true
-              }
-            }
+            uploadedBy: { select: { fullName: true, email: true } },
+            reviewedBy: { select: { fullName: true, email: true } },
           },
-          orderBy: { createdAt: 'desc' }
-        }
-      }
+          orderBy: { createdAt: "desc" },
+        },
+      },
     });
 
-    if (!provider) {
-      return res.status(404).json({ error: 'Proveedor no encontrado' });
-    }
+    if (!provider) return res.status(404).json({ error: "Proveedor no encontrado" });
 
-    res.json({
+    const docsWithUrl = await attachSignedUrlsToDocuments(provider.documents);
+
+    return res.json({
       providerId: provider.id,
       personType: provider.personType,
-      documents: provider.documents
+      documents: docsWithUrl,
     });
   } catch (error) {
-    console.error('Error al obtener documentos:', error);
-    res.status(500).json({ error: 'Error al cargar documentos' });
+    console.error("Error al obtener documentos:", error);
+    return res.status(500).json({ error: "Error al cargar documentos" });
   }
 }
 
-// Subir documentos del proveedor
+// Subir documentos del proveedor (SOLO PDF)
 export async function uploadDocuments(req, res) {
   try {
     const userEmail = req.user.email;
     const userId = req.user.id;
-    const { personType } = req.body;
+    const personTypeRaw = req.body?.personType;
+    const personType = safeUpper(personTypeRaw);
 
-    if (!personType || !['FISICA', 'MORAL'].includes(personType)) {
-      return res.status(400).json({ 
-        error: 'Tipo de persona inválido. Debe ser FISICA o MORAL' 
+    if (!personType || !["FISICA", "MORAL"].includes(personType)) {
+      return res.status(400).json({
+        error: "Tipo de persona inválido. Debe ser FISICA o MORAL",
+        received: personTypeRaw ?? null,
       });
     }
 
-    // Buscar proveedor por email
     const provider = await prisma.provider.findFirst({
-      where: { 
-        emailContacto: userEmail,
-        isActive: true 
-      }
+      where: { emailContacto: userEmail, isActive: true },
     });
+    if (!provider) return res.status(404).json({ error: "Proveedor no encontrado" });
 
-    if (!provider) {
-      return res.status(404).json({ error: 'Proveedor no encontrado' });
-    }
-
-    // Verificar que se subieron archivos
     if (!req.files || req.files.length === 0) {
-      return res.status(400).json({ error: 'No se subieron archivos' });
+      return res.status(400).json({ error: "No se subieron archivos" });
     }
 
-    // Obtener tipos de documento requeridos
+    //  validar required docs
     const requiredDocTypes = await prisma.documentType.findMany({
-      where: {
-        requiredFor: { has: personType },
-        isRequired: true
-      }
+      where: { requiredFor: { has: personType }, isRequired: true },
     });
 
-    // Validar que se subieron todos los documentos requeridos
-    const uploadedDocTypeCodes = req.files.map(f => f.fieldname);
-    const missingDocs = requiredDocTypes.filter(dt => 
-      !uploadedDocTypeCodes.includes(dt.code)
-    );
-
+    const uploadedDocTypeCodes = req.files.map((f) => f.fieldname);
+    const missingDocs = requiredDocTypes.filter((dt) => !uploadedDocTypeCodes.includes(dt.code));
     if (missingDocs.length > 0) {
-      return res.status(400).json({ 
-        error: 'Faltan documentos requeridos',
-        missing: missingDocs.map(d => d.name)
+      return res.status(400).json({
+        error: "Faltan documentos requeridos",
+        missing: missingDocs.map((d) => d.name),
       });
     }
 
-    // Primero: subir todos los archivos a Supabase fuera de la transacción
-    const uploads = [];
-    for (const file of req.files) {
-      const docTypeCode = file.fieldname;
-      const timestamp = Date.now();
-      const ext = path.extname(file.originalname);
-      const filename = `${docTypeCode}_${timestamp}${ext}`;
-      const filePath = `${provider.id}/${filename}`;
-      const contentType = file.mimetype || 'application/pdf';
+    //  validar que TODO sea PDF + tamaño
+    //  validación extra solo para CONTRATO: firma visible en última página / zona final
+    for (const f of req.files) {
+      if (!isPdfFile(f)) {
+        return res.status(400).json({
+          error: `El documento "${f.fieldname}" debe ser PDF.`,
+          detail: { fileName: f.originalname, mimetype: f.mimetype },
+        });
+      }
+
+      const docTypeCode = safeUpper(f.fieldname);
+
+      // límite normal para todos los documentos
+      let maxSize = MAX_DOC_PDF_BYTES;
+
+      // si es contrato, permitir archivos mucho más grandes
+      if (docTypeCode === "CONTRATO") {
+        maxSize = 30 * 1024 * 1024; // 30MB
+      }
 
       try {
-        const upload = await uploadToSupabase('provider-documents', filePath, file.buffer, contentType);
-        uploads.push({ file, docTypeCode, fileUrl: upload.url, storageKey: upload.path });
-        console.log('Uploaded to Supabase:', { bucket: 'provider-documents', path: filePath, storageKey: upload.path });
+        assertFileSize(f, maxSize, `PDF (${f.fieldname})`);
       } catch (e) {
-        console.error('Error subiendo documento a Supabase (fuera tx) tipo:', docTypeCode, e);
-        // Si falla una subida, intentar limpiar las previas
-        for (const u of uploads) {
-          try { await deleteFromSupabase('provider-documents', u.storageKey); } catch (er) { console.warn('No se pudo eliminar archivo tras fallo:', u.storageKey, er.message || er); }
+        return res.status(400).json({ error: e.message });
+      }
+
+      if (docTypeCode === "CONTRATO") {
+        let signatureResult;
+
+        try {
+          signatureResult = await detectContractSignature(f.buffer, {
+            scale: 2.2,
+
+            // Ajustado a zona final del contrato
+            regionTopRatio: 0.62,
+            regionBottomRatio: 0.98,
+            regionLeftRatio: 0.30,
+            regionRightRatio: 0.98,
+
+            // Umbrales iniciales razonables
+            darkPixelThreshold: 175,
+            minInkRatio: 0.0030,
+            minActiveRows: 8,
+            minActiveCols: 25,
+            minDarkPixels: 350,
+          });
+        } catch (e) {
+          console.error("Error analizando firma del contrato:", e);
+
+          await logAudit(req, {
+            actorId: userId,
+            action: "CONTRACT_SIGNATURE_CHECK_ERROR",
+            entity: "ProviderDocument",
+            entityId: provider.id,
+            meta: {
+              providerId: provider.id,
+              fileName: f.originalname,
+              reason: e.message || String(e),
+            },
+          });
+
+          return res.status(500).json({
+            error: "No se pudo analizar la firma del contrato. Intenta nuevamente con un PDF legible.",
+          });
         }
-        return res.status(502).json({ error: 'Error subiendo documento a storage', detail: e.message || String(e) });
+
+        if (!signatureResult?.detected) {
+          await logAudit(req, {
+            actorId: userId,
+            action: "CONTRACT_SIGNATURE_NOT_DETECTED",
+            entity: "ProviderDocument",
+            entityId: provider.id,
+            meta: {
+              providerId: provider.id,
+              fileName: f.originalname,
+              detection: signatureResult,
+            },
+          });
+
+          return res.status(400).json({
+            error: "El contrato no presenta una firma visible en la zona final de la última página.",
+            code: "CONTRACT_SIGNATURE_NOT_DETECTED",
+            detection: signatureResult,
+          });
+        }
+
+        await logAudit(req, {
+          actorId: userId,
+          action: "CONTRACT_SIGNATURE_DETECTED",
+          entity: "ProviderDocument",
+          entityId: provider.id,
+          meta: {
+            providerId: provider.id,
+            fileName: f.originalname,
+            detection: signatureResult,
+          },
+        });
       }
     }
 
-    console.log('All uploads completed, proceeding to DB transaction. uploads count:', uploads.length);
+    //  AUDIT: intento subida
+    await logAudit(req, {
+      actorId: userId,
+      action: "DOC_UPLOAD_START",
+      entity: "ProviderDocument",
+      entityId: provider.id,
+      meta: {
+        providerId: provider.id,
+        personType,
+        files: req.files.map((f) => ({ code: f.fieldname, name: f.originalname, size: f.size })),
+      },
+    });
 
-    // Ahora ejecutar la transacción para actualizar BD usando los resultados de las subidas
+    // Subir a Supabase fuera de transacción
+    const uploads = []; // { docTypeCode, storageKey, fileName }
+    for (const file of req.files) {
+      const docTypeCode = file.fieldname;
+
+      //  path fijo: SIEMPRE {providerId}/{docType}.pdf
+      const storageKey = buildDocStorageKey(provider.id, docTypeCode);
+
+      try {
+        await uploadToSupabase(DOCS_BUCKET, storageKey, file.buffer, {
+          contentType: "application/pdf",
+          upsert: true,
+        });
+
+        uploads.push({ docTypeCode, storageKey, fileName: file.originalname });
+      } catch (e) {
+        console.error("Error subiendo documento a Supabase (fuera tx) tipo:", docTypeCode, e);
+
+        // best-effort cleanup
+        for (const u of uploads) {
+          try {
+            await deleteFromSupabase(DOCS_BUCKET, u.storageKey);
+          } catch (er) {
+            console.warn("No se pudo eliminar archivo tras fallo:", u.storageKey, er.message || er);
+          }
+        }
+
+        await logAudit(req, {
+          actorId: userId,
+          action: "DOC_UPLOAD_STORAGE_FAIL",
+          entity: "ProviderDocument",
+          entityId: provider.id,
+          meta: { providerId: provider.id, personType, reason: e.message || String(e) },
+        });
+
+        return res.status(502).json({
+          error: "Error subiendo documento a storage",
+          detail: e.message || String(e),
+        });
+      }
+    }
+
     const savedDocuments = [];
     try {
       await prisma.$transaction(async (tx) => {
-        const upd = await tx.provider.update({ where: { id: provider.id }, data: { personType } });
-        console.log('Provider personType updated in tx:', { providerId: provider.id, personType, updatedAt: upd.updatedAt });
+        await tx.provider.update({ where: { id: provider.id }, data: { personType } });
 
         for (const u of uploads) {
           const docType = await tx.documentType.findUnique({ where: { code: u.docTypeCode } });
           if (!docType) throw new Error(`Tipo de documento no encontrado: ${u.docTypeCode}`);
 
           const existing = await tx.providerDocument.findUnique({
-            where: { providerId_documentTypeId: { providerId: provider.id, documentTypeId: docType.id } }
+            where: {
+              providerId_documentTypeId: {
+                providerId: provider.id,
+                documentTypeId: docType.id,
+              },
+            },
           });
 
           let document;
           if (existing) {
-            if (existing.storageKey) {
-              try { await deleteFromSupabase('provider-documents', existing.storageKey); } catch (e) { console.warn('No se pudo eliminar archivo antiguo de Supabase:', e.message || e); }
-            }
-
+            //  ya no borramos previo: path fijo + upsert sobrescribe
             document = await tx.providerDocument.update({
               where: { id: existing.id },
               data: {
-                fileUrl: u.fileUrl,
+                fileUrl: null,
                 storageKey: u.storageKey,
-                status: 'PENDING',
+                status: "PENDING",
                 uploadedById: userId,
                 reviewedById: null,
-                notes: null
+                notes: null,
               },
-              include: { documentType: true }
+              include: {
+                documentType: true,
+              },
             });
-            console.log('Updated existing providerDocument in tx:', { id: existing.id, documentTypeId: docType.id });
           } else {
             document = await tx.providerDocument.create({
               data: {
                 providerId: provider.id,
                 documentTypeId: docType.id,
-                fileUrl: u.fileUrl,
+                fileUrl: null,
                 storageKey: u.storageKey,
-                status: 'PENDING',
-                uploadedById: userId
+                status: "PENDING",
+                uploadedById: userId,
               },
-              include: { documentType: true }
+              include: {
+                documentType: true,
+              },
             });
-            console.log('Created new providerDocument in tx:', { id: document.id, documentTypeId: docType.id });
           }
 
           savedDocuments.push(document);
@@ -214,28 +371,99 @@ export async function uploadDocuments(req, res) {
         await tx.auditLog.create({
           data: {
             actorId: userId,
-            action: 'UPLOAD_PROVIDER_DOCUMENTS',
-            entity: 'ProviderDocument',
+            action: "UPLOAD_PROVIDER_DOCUMENTS",
+            entity: "ProviderDocument",
             entityId: provider.id,
-            meta: { personType, documentsCount: savedDocuments.length, documentTypes: savedDocuments.map(d => d.documentType.name) }
-          }
+            meta: {
+              personType,
+              documentsCount: savedDocuments.length,
+              documentTypes: savedDocuments.map((d) => d.documentType.name),
+              storageKeys: savedDocuments.map((d) => d.storageKey),
+            },
+          },
         });
       });
     } catch (e) {
-      console.error('Error en transacción al guardar documentos en BD:', e);
-      // Si la transacción falla, eliminar los archivos ya subidos para evitar orfanatos
+      console.error("Error en transacción al guardar documentos en BD:", e);
+
       for (const u of uploads) {
-        try { await deleteFromSupabase('provider-documents', u.storageKey); } catch (er) { console.warn('No se pudo eliminar archivo tras fallo transacción:', u.storageKey, er.message || er); }
+        try {
+          await deleteFromSupabase(DOCS_BUCKET, u.storageKey);
+        } catch (er) {
+          console.warn("No se pudo eliminar archivo tras fallo transacción:", u.storageKey, er.message || er);
+        }
       }
-      return res.status(500).json({ error: 'Error al guardar documentos en base de datos', detail: e.message || String(e) });
+
+      await logAudit(req, {
+        actorId: userId,
+        action: "DOC_UPLOAD_DB_FAIL",
+        entity: "ProviderDocument",
+        entityId: provider.id,
+        meta: { providerId: provider.id, personType, reason: e.message || String(e) },
+      });
+
+      return res.status(500).json({
+        error: "Error al guardar documentos en base de datos",
+        detail: e.message || String(e),
+      });
     }
 
-    res.status(201).json({ message: 'Documentos subidos correctamente', documents: savedDocuments });
-  } catch (error) {
-    console.error('Error al subir documentos:', error);
-    res.status(500).json({ 
-      error: error.message || 'Error al subir documentos' 
+    await logAudit(req, {
+      actorId: userId,
+      action: "DOC_UPLOAD_SUCCESS",
+      entity: "ProviderDocument",
+      entityId: provider.id,
+      meta: {
+        providerId: provider.id,
+        personType,
+        documentsCount: savedDocuments.length,
+        documentIds: savedDocuments.map((d) => d.id),
+      },
     });
+
+    //  NUEVO: notificar a aprobadores por documentos subidos
+    try {
+      const providerName = provider.businessName || req.user?.email || "Proveedor";
+
+      await notifyRoles({
+        roleNames: ["APPROVER"],
+        type: "DOCUMENT_SUBMITTED",
+        entityType: "DOCUMENT",
+        entityId: savedDocuments[0]?.id || provider.id,
+        title: "Nuevos documentos por revisar",
+        message: `El proveedor ${providerName} subió documentos y requieren revisión.`,
+        data: {
+          providerId: provider.id,
+          providerName,
+          personType,
+          documentsCount: savedDocuments.length,
+          documentIds: savedDocuments.map((d) => d.id),
+          documentTypes: savedDocuments.map((d) => d.documentType?.name || d.documentType?.code || null),
+        },
+        sendEmail: true,
+      });
+    } catch (e) {
+      console.error("Error notificando a aprobadores por documentos subidos:", e);
+    }
+
+    const docsWithSigned = await attachSignedUrlsToDocuments(savedDocuments);
+
+    return res.status(201).json({
+      message: "Documentos subidos correctamente",
+      documents: docsWithSigned,
+    });
+  } catch (error) {
+    console.error("Error al subir documentos:", error);
+
+    await logAudit(req, {
+      actorId: req.user?.id ?? null,
+      action: "DOC_UPLOAD_FAIL",
+      entity: "ProviderDocument",
+      entityId: null,
+      meta: { reason: error.message || String(error) },
+    });
+
+    return res.status(500).json({ error: error.message || "Error al subir documentos" });
   }
 }
 
@@ -246,62 +474,58 @@ export async function deleteDocument(req, res) {
     const userId = req.user.id;
     const { documentId } = req.params;
 
-    // Buscar proveedor
     const provider = await prisma.provider.findFirst({
-      where: { 
-        emailContacto: userEmail,
-        isActive: true 
-      }
+      where: { emailContacto: userEmail, isActive: true },
     });
+    if (!provider) return res.status(404).json({ error: "Proveedor no encontrado" });
 
-    if (!provider) {
-      return res.status(404).json({ error: 'Proveedor no encontrado' });
-    }
-
-    // Buscar documento
     const document = await prisma.providerDocument.findFirst({
-      where: {
-        id: parseInt(documentId),
-        providerId: provider.id
-      }
+      where: { id: parseInt(documentId), providerId: provider.id },
     });
+    if (!document) return res.status(404).json({ error: "Documento no encontrado" });
 
-    if (!document) {
-      return res.status(404).json({ error: 'Documento no encontrado' });
-    }
-
-    // Eliminar archivo de Supabase Storage
     if (document.storageKey) {
       try {
-        await deleteFromSupabase('provider-documents', document.storageKey);
+        await deleteFromSupabase(DOCS_BUCKET, document.storageKey);
       } catch (e) {
-        console.warn('No se pudo eliminar archivo de Supabase:', e.message);
+        console.warn("No se pudo eliminar archivo de Supabase:", e.message);
       }
     }
 
-    // Eliminar registro de BD
     await prisma.$transaction(async (tx) => {
-      await tx.providerDocument.delete({
-        where: { id: document.id }
-      });
+      await tx.providerDocument.delete({ where: { id: document.id } });
 
       await tx.auditLog.create({
         data: {
           actorId: userId,
-          action: 'DELETE_PROVIDER_DOCUMENT',
-          entity: 'ProviderDocument',
+          action: "DELETE_PROVIDER_DOCUMENT",
+          entity: "ProviderDocument",
           entityId: document.id,
-          meta: {
-            providerId: provider.id,
-            documentTypeId: document.documentTypeId
-          }
-        }
+          meta: { providerId: provider.id, documentTypeId: document.documentTypeId },
+        },
       });
     });
 
-    res.json({ message: 'Documento eliminado correctamente' });
+    await logAudit(req, {
+      actorId: userId,
+      action: "DOC_DELETE",
+      entity: "ProviderDocument",
+      entityId: document.id,
+      meta: { providerId: provider.id, documentTypeId: document.documentTypeId },
+    });
+
+    return res.json({ message: "Documento eliminado correctamente" });
   } catch (error) {
-    console.error('Error al eliminar documento:', error);
-    res.status(500).json({ error: 'Error al eliminar documento' });
+    console.error("Error al eliminar documento:", error);
+
+    await logAudit(req, {
+      actorId: req.user?.id ?? null,
+      action: "DOC_DELETE_FAIL",
+      entity: "ProviderDocument",
+      entityId: parseInt(req.params.documentId) || null,
+      meta: { reason: error.message || String(error) },
+    });
+
+    return res.status(500).json({ error: "Error al eliminar documento" });
   }
 }

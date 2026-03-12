@@ -13,7 +13,6 @@ async function generateTestToken() {
     });
 
     if (!user) {
-      console.log('❌ No se encontró ningún usuario activo');
       return;
     }
 
@@ -27,15 +26,6 @@ async function generateTestToken() {
       email: user.email,
       roles
     });
-
-    console.log('\n✅ Token generado para:', user.email);
-    console.log('\n📋 Copia este token para Postman:\n');
-    console.log(token);
-    console.log('\n🔧 Usa en Headers de Postman:');
-    console.log(`Cookie: gp_token=${token}`);
-    console.log('\n🔧 O en Authorization:');
-    console.log(`Bearer ${token}`);
-    console.log('\n');
 
   } catch (error) {
     console.error('Error:', error);

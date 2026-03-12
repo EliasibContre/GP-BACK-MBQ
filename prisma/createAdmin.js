@@ -37,7 +37,6 @@ async function main() {
     data: { userId: user.id, roleId },
   });
 
-  console.log('Usuario admin creado:', { id: user.id, email: user.email, role: role.name });
   await prisma.$disconnect();
 }
 

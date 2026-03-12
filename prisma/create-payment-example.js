@@ -23,14 +23,8 @@ async function createPaymentExample() {
     });
 
     if (!purchaseOrder) {
-      console.log('❌ No se encontraron órdenes de compra recibidas');
       return;
     }
-
-    console.log(`✅ Orden encontrada: ${purchaseOrder.number}`);
-    console.log(`   Proveedor: ${purchaseOrder.provider.businessName}`);
-    console.log(`   Total: $${purchaseOrder.total}`);
-    console.log(`   Pagos existentes: ${purchaseOrder.payments.length}`);
 
     // 2. Calcular cuánto se ha pagado
     const totalPaid = purchaseOrder.payments.reduce(
@@ -40,11 +34,7 @@ async function createPaymentExample() {
     
     const remaining = Number(purchaseOrder.total) - totalPaid;
 
-    console.log(`   Total pagado: $${totalPaid}`);
-    console.log(`   Restante: $${remaining}`);
-
     if (remaining <= 0) {
-      console.log('⚠️  Esta orden ya está totalmente pagada');
       return;
     }
 
@@ -58,13 +48,6 @@ async function createPaymentExample() {
         reference: `REF-${Date.now()}`
       }
     });
-
-    console.log('\n🎉 Pago creado exitosamente:');
-    console.log(`   ID: ${payment.id}`);
-    console.log(`   Monto: $${payment.amount}`);
-    console.log(`   Método: ${payment.method}`);
-    console.log(`   Referencia: ${payment.reference}`);
-    console.log(`   Fecha: ${payment.paidAt.toISOString()}`);
 
   } catch (error) {
     console.error('❌ Error:', error.message);

@@ -69,8 +69,6 @@ async function main() {
       isActive: true
     },
   });
-
-  console.log('✅ Seed ejecutado correctamente: Roles, Admin y Documentos creados.');
 }
 
 main()

@@ -8,7 +8,6 @@ const prisma = new PrismaClient();
 
 async function crearOrdenesDraft() {
   try {
-    console.log('🚀 Iniciando creación de órdenes de compra DRAFT...\n');
 
     // 1. Obtener proveedores activos
     const proveedores = await prisma.provider.findMany({
@@ -20,11 +19,9 @@ async function crearOrdenesDraft() {
     });
 
     if (proveedores.length === 0) {
-      console.log('❌ No hay proveedores activos. Primero crea proveedores.');
       return;
     }
 
-    console.log(`✅ Encontrados ${proveedores.length} proveedores activos\n`);
 
     // 2. Obtener un usuario admin para ser el creador
     const adminUser = await prisma.user.findFirst({
@@ -36,11 +33,9 @@ async function crearOrdenesDraft() {
     });
 
     if (!adminUser) {
-      console.log('❌ No hay usuario admin. Primero crea un usuario admin.');
       return;
     }
 
-    console.log(`✅ Usuario admin encontrado: ${adminUser.email}\n`);
 
     // 3. Crear órdenes DRAFT para cada proveedor
     const ordenes = [];
@@ -73,12 +68,6 @@ async function crearOrdenesDraft() {
       });
 
       ordenes.push(orden);
-
-      console.log(`✅ Orden creada: ${orden.number}`);
-      console.log(`   Proveedor: ${proveedor.businessName}`);
-      console.log(`   Total: $${parseFloat(total).toLocaleString('es-MX', { minimumFractionDigits: 2 })}`);
-      console.log(`   Estado: ${orden.status}`);
-      console.log(`   Fecha emisión: ${orden.issuedAt.toLocaleDateString('es-MX')}\n`);
     }
 
     // 4. Crear una orden en estado SENT (ya aprobada)
@@ -101,11 +90,6 @@ async function crearOrdenesDraft() {
       }
     });
 
-    console.log(`✅ Orden en estado APPROVED creada: ${ordenSent.number}`);
-    console.log(`   Proveedor: ${ordenSent.provider.businessName}`);
-    console.log(`   Total: $${parseFloat(ordenSent.total).toLocaleString('es-MX', { minimumFractionDigits: 2 })}`);
-    console.log(`   Estado: ${ordenSent.status} (puede marcarse como recibida)\n`);
-
     // 5. Crear una orden RECEIVED (completa)
     const ordenReceived = await prisma.purchaseOrder.create({
       data: {
@@ -127,26 +111,6 @@ async function crearOrdenesDraft() {
         provider: true
       }
     });
-
-    console.log(`✅ Orden en estado RECEIVED creada: ${ordenReceived.number}`);
-    console.log(`   Proveedor: ${ordenReceived.provider.businessName}`);
-    console.log(`   Total: $${parseFloat(ordenReceived.total).toLocaleString('es-MX', { minimumFractionDigits: 2 })}`);
-    console.log(`   Estado: ${ordenReceived.status} (completa)\n`);
-
-    // 6. Resumen
-    console.log('=' .repeat(60));
-    console.log('📊 RESUMEN');
-    console.log('=' .repeat(60));
-    console.log(`✅ ${ordenes.length} órdenes DRAFT creadas (pendientes de aprobación)`);
-    console.log(`✅ 1 orden SENT creada (para marcar como recibida)`);
-    console.log(`✅ 1 orden RECEIVED creada (ejemplo completo)`);
-    console.log(`\n📝 Total de órdenes creadas: ${ordenes.length + 2}\n`);
-
-    console.log('🎯 Próximos pasos:');
-    console.log('1. Inicia sesión como APROBADOR en el frontend');
-    console.log('2. Ve a la sección "Aprobación"');
-    console.log('3. En el tab "Órdenes de Compra" verás las órdenes DRAFT');
-    console.log('4. Prueba aprobar, rechazar o marcar como recibida\n');
 
   } catch (error) {
     console.error('❌ Error:', error);

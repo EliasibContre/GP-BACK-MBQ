@@ -18,7 +18,6 @@ async function main() {
   });
 
   if (lowerRoles.length === 0) {
-    console.log('No hay roles en minúscula/título para limpiar.');
     const roles = await prisma.role.findMany({ orderBy: { id: 'asc' } });
     console.table(roles);
     return;
@@ -36,10 +35,8 @@ async function main() {
         where: { roleId: low.id },
         data: { roleId: targetUpper.id },
       });
-      console.log(`Migradas ${affected.count} asignaciones de '${low.name}' -> '${targetUpper.name}'.`);
 
       await tx.role.delete({ where: { id: low.id } });
-      console.log(`Eliminado rol duplicado '${low.name}' (id=${low.id}).`);
     }
   });
 

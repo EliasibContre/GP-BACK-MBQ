@@ -16,6 +16,8 @@ import calendarRoutes from './routes/calendar.routes.js';
 import notificationRoutes from './routes/notification.routes.js';
 import analyticsRoutes from './routes/analytics.routes.js';
 import paymentRoutes from './routes/payment.routes.js';
+import satRoutes from "./routes/sat.routes.js";
+import paymentEvidenceRoutes from "./routes/paymentEvidence.routes.js";
 
 // Carga variables de entorno
 import './config/env.js';
@@ -27,13 +29,10 @@ import authRoutes from './routes/auth.routes.js';
 const app = express();
 verifyMailer();
 
-const allowedOrigins = [
-  'http://localhost:5173', // Para que te funcione en local siempre
-  ...(process.env.FRONT_PUBLIC_URL || '').split(',').map(url => url.trim())
-].filter(Boolean);
-
-console.log('🔒 CORS allowed origins:', allowedOrigins); // <- AÑADE ESTO
-
+const allowedOrigins = (process.env.FRONT_PUBLIC_URLS || "http://localhost:5173")
+  .split(",")
+  .map((u) => u.trim())
+  .filter(Boolean);
 
 // Para que el frontend pueda enviar/recibir cookie HttpOnly (ajusta origin en prod)
 app.use(cors({ origin: allowedOrigins, credentials: true }));
@@ -55,10 +54,13 @@ app.use('/api/calendar', calendarRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/analytics', analyticsRoutes);
 app.use('/api/payments', paymentRoutes);
+app.use("/api/sat", satRoutes);
+
 
 // Servir archivos estáticos de uploads
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 app.use('/api/digital-files', digitalFilesRoutes);
+app.use("/api/payment-evidence", paymentEvidenceRoutes);
 
 // Manejo de errores simple
 app.use((err, req, res, next) => {

@@ -25,6 +25,9 @@ model User {
   loginCodes            LoginCode[]
   notifications         Notification[]
   passwordResetTokens   PasswordResetToken[]
+  createdPayments       Payment[]            @relation("PaymentCreatedBy")
+  decidedPayments       Payment[]            @relation("PaymentDecidedBy")
+  deletedProviders      Provider[]           @relation("DeletedProviders")
   inactivatedProviders  Provider[]           @relation("InactivatedProviders")
   reviewedDocs          ProviderDocument[]   @relation("ReviewedByUser")
   uploadedDocs          ProviderDocument[]   @relation("UploadedByUser")
@@ -91,13 +94,17 @@ model Provider {
   isActive          Boolean               @default(true)
   observaciones     String?
   personType        PersonType?
+  deletedAt         DateTime?
+  deletedBy         Int?
   invoices          Invoice[]
+  deletedByUser     User?                 @relation("DeletedProviders", fields: [deletedBy], references: [id])
   inactivatedByUser User?                 @relation("InactivatedProviders", fields: [inactivatedBy], references: [id])
   bankAccounts      ProviderBankAccount[]
   contacts          ProviderContact[]
   documents         ProviderDocument[]
   purchaseOrders    PurchaseOrder[]
 
+  @@index([deletedAt])
   @@index([businessName])
   @@index([isActive])
 }
@@ -200,21 +207,21 @@ model SatImport {
 /// *
 /// * ===================== Órdenes de compra, Facturas y Pagos =====================
 model PurchaseOrder {
-  id                   Int                 @id @default(autoincrement())
-  number               String              @unique
+  id                   Int                    @id @default(autoincrement())
+  number               String                 @unique
   providerId           Int
-  status               PurchaseOrderStatus @default(DRAFT)
-  currency             String              @default("MXN")
-  subtotal             Decimal?            @db.Decimal(14, 2)
-  taxes                Decimal?            @db.Decimal(14, 2)
-  total                Decimal?            @db.Decimal(14, 2)
+  status               PurchaseOrderStatus    @default(DRAFT)
+  currency             String                 @default("MXN")
+  subtotal             Decimal?               @db.Decimal(14, 2)
+  taxes                Decimal?               @db.Decimal(14, 2)
+  total                Decimal?               @db.Decimal(14, 2)
   createdById          Int
   approvedById         Int?
   issuedAt             DateTime?
   approvedAt           DateTime?
   receivedAt           DateTime?
-  createdAt            DateTime            @default(now())
-  updatedAt            DateTime            @updatedAt
+  createdAt            DateTime               @default(now())
+  updatedAt            DateTime               @updatedAt
   invoicePdfUrl        String?
   invoiceStorageKey    String?
   invoiceUploadedAt    DateTime?
@@ -225,12 +232,26 @@ model PurchaseOrder {
   storageKey           String?
   invoices             Invoice[]
   payments             Payment[]
-  approvedBy           User?               @relation("POApprovedBy", fields: [approvedById], references: [id])
-  createdBy            User                @relation("POCreatedBy", fields: [createdById], references: [id])
-  provider             Provider            @relation(fields: [providerId], references: [id])
+  approvedBy           User?                  @relation("POApprovedBy", fields: [approvedById], references: [id])
+  createdBy            User                   @relation("POCreatedBy", fields: [createdById], references: [id])
+  provider             Provider               @relation(fields: [providerId], references: [id])
+  poInvoices           PurchaseOrderInvoice[]
   items                PurchaseOrderItem[]
 
   @@index([providerId, status])
+}
+
+model PurchaseOrderInvoice {
+  id              Int           @id @default(autoincrement())
+  purchaseOrderId Int
+  pdfUrl          String?
+  pdfStorageKey   String?
+  xmlUrl          String?
+  xmlStorageKey   String?
+  uploadedAt      DateTime      @default(now())
+  purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+
+  @@index([purchaseOrderId])
 }
 
 model PurchaseOrderItem {
@@ -266,16 +287,54 @@ model Invoice {
 }
 
 model Payment {
-  id              Int           @id @default(autoincrement())
-  amount          Decimal       @db.Decimal(14, 2)
-  paidAt          DateTime
-  method          PaymentMethod @default(TRANSFER)
-  reference       String?
-  createdAt       DateTime      @default(now())
-  purchaseOrderId Int
-  purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  id                Int               @id @default(autoincrement())
+  amount            Decimal           @db.Decimal(14, 2)
+  paidAt            DateTime
+  method            PaymentMethod     @default(TRANSFER)
+  reference         String?
+  createdAt         DateTime          @default(now())
+  purchaseOrderId   Int
+  createdById       Int?
+  decidedAt         DateTime?
+  decidedById       Int?
+  decisionComment   String?
+  installmentNo     Int?
+  installmentOf     Int?
+  status            PaymentStatus     @default(PENDING)
+  isScheduled       Boolean           @default(false)
+  invoiceErrorsJson Json?
+  rejectionType     String?
+  closeAt           DateTime?
+  createdBy         User?             @relation("PaymentCreatedBy", fields: [createdById], references: [id])
+  decidedBy         User?             @relation("PaymentDecidedBy", fields: [decidedById], references: [id])
+  purchaseOrder     PurchaseOrder     @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  evidences         PaymentEvidence[]
 
   @@index([purchaseOrderId])
+  @@index([status])
+  @@index([paidAt])
+}
+
+model PaymentEvidence {
+  id           String       @id @default(cuid())
+  paymentId    Int
+  uploadedById Int?
+  kind         EvidenceKind
+  bucket       String
+  path         String
+  fileName     String
+  mimeType     String?
+  sizeBytes    Int?
+  sha256       String?
+  version      Int          @default(1)
+  isActive     Boolean      @default(true)
+  comment      String?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+  payment      Payment      @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  @@index([paymentId])
+  @@index([paymentId, kind])
 }
 
 /// *
@@ -329,6 +388,20 @@ model AccessRequest {
 
   @@index([email, status])
   @@index([status])
+}
+
+enum PaymentStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  PAID
+  SUBMITTED
+}
+
+enum EvidenceKind {
+  PDF
+  XML
+  OTHER
 }
 
 /// *

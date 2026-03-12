@@ -1,3 +1,4 @@
+// src/middlewares/requireRole.js
 export function requireRole(rolesAllowed) {
   const allowed = (Array.isArray(rolesAllowed) ? rolesAllowed : [rolesAllowed])
     .map(r => r.toString().toUpperCase());

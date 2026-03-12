@@ -1,3 +1,4 @@
+// config/mailer.js
 import nodemailer from 'nodemailer';
 
 const {
@@ -25,7 +26,6 @@ export const mailer = useStreamTransport
 export async function verifyMailer() {
   try {
     await mailer.verify();
-    console.log('Mailer: transporte SMTP OK');
   } catch (err) {
     console.warn('Mailer: no se pudo verificar SMTP:', err.message);
   }

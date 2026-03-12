@@ -1,167 +1,367 @@
+// src/controllers/auth.controller.js
 import {
   createUserWithRoles,
   startLogin,
   verifyLoginCodeAndIssueToken,
-  changePassword,
   requestPasswordReset,
   resetPassword,
-} from '../services/auth.service.js';
-import { verifyJwt, signJwt } from '../utils/jwt.js';
-import { resendLoginCode } from '../services/auth.service.js';
-import { changePassword  as changePasswordSvc} from '../services/auth.service.js';
+  resendLoginCode,
+  changePassword as changePasswordSvc,
+} from "../services/auth.service.js";
 
-const COOKIE_NAME = process.env.COOKIE_NAME || 'gp_token';
+import { logAudit } from "../utils/audit.js";
+import { verifyJwt, signJwt } from "../utils/jwt.js";
+
+const ROLE_MAP = {
+  ADMIN: "ADMIN",
+  ADMINISTRADOR: "ADMIN",
+  APPROVER: "APPROVER",
+  APROBADOR: "APPROVER",
+  PROVIDER: "PROVIDER",
+  PROVEEDOR: "PROVIDER",
+};
+
+function normalizeRole(input) {
+  const key = String(input || "").trim().toUpperCase();
+  return ROLE_MAP[key] || null;
+}
+
+function normalizeRoles(inputRoles) {
+  if (!inputRoles) return { unique: [], invalid: [] };
+
+  const arr = Array.isArray(inputRoles) ? inputRoles : [inputRoles];
+
+  const normalized = [];
+  const invalid = [];
+
+  for (const r of arr) {
+    const nr = normalizeRole(r);
+    if (!nr) invalid.push(r);
+    else normalized.push(nr);
+  }
+
+  const unique = [...new Set(normalized)];
+  return { unique, invalid };
+}
+
+const COOKIE_NAME = process.env.COOKIE_NAME || "gp_token";
 
 function cookieOptions() {
   return {
     httpOnly: true,
-    sameSite: (process.env.COOKIE_SAMESITE || 'lax').toLowerCase() === 'none' ? 'none' : 'lax',     // para localhost funciona con fetch/axios
-    secure: (process.env.COOKIE_SECURE || 'false') === 'true',       // en prod ponlo en true detrás de HTTPS
-    path: '/',
-    maxAge: 7 * 24 * 60 * 60 * 1000, // 7 días
+    sameSite:
+      (process.env.COOKIE_SAMESITE || "lax").toLowerCase() === "none"
+        ? "none"
+        : "lax",
+    secure: (process.env.COOKIE_SECURE || "false") === "true",
+    path: "/",
+    maxAge: 7 * 24 * 60 * 60 * 1000,
   };
 }
 
 function buildSessionFromClaims(claims) {
-  const iat = Number(claims.iat || 0);
-  const exp = Number(claims.exp || 0);
+  const iat = Number(claims?.iat || 0);
+  const exp = Number(claims?.exp || 0);
+
   return {
-    issuedAt: new Date(iat * 1000).toISOString(),
-    expiresAt: new Date(exp * 1000).toISOString(),
-    ttlSeconds: Math.max(0, exp - iat),
+    issuedAt: iat ? new Date(iat * 1000).toISOString() : null,
+    expiresAt: exp ? new Date(exp * 1000).toISOString() : null,
+    ttlSeconds: iat && exp ? Math.max(0, exp - iat) : 0,
   };
 }
 
-export async function registerCtrl(req, res) {
-  const { email, fullName, password, roles } = req.body;
-  const user = await createUserWithRoles({ email, fullName, password, roles });
-  return res.status(201).json({ message: 'Usuario creado', user });
+function getErrorStatus(err, fallback = 500) {
+  const status = Number(err?.status);
+  return Number.isInteger(status) && status >= 100 ? status : fallback;
 }
 
-// Paso 1: credenciales
+function getErrorMessage(err, fallback = "Error del servidor") {
+  return err?.message || fallback;
+}
+
+//  REGISTRO
+export async function registerCtrl(req, res) {
+  try {
+    const { email, fullName, password, roles } = req.body;
+
+    const { unique: normalizedRoles, invalid } = normalizeRoles(roles);
+
+    if (invalid.length) {
+      return res.status(400).json({
+        message:
+          "Rol inválido. Usa ADMIN / APPROVER / PROVIDER (o Administrador/Aprobador/Proveedor).",
+        invalid,
+      });
+    }
+
+    if (!normalizedRoles.length) {
+      return res.status(400).json({
+        message: "Debes enviar al menos un rol (ADMIN, APPROVER o PROVIDER).",
+      });
+    }
+
+    const user = await createUserWithRoles({
+      email,
+      fullName,
+      password,
+      roles: normalizedRoles,
+    });
+
+    await logAudit(req, {
+      actorId: req.user?.id ?? null,
+      action: "AUTH_REGISTER_USER",
+      entity: "User",
+      entityId: user?.id ?? null,
+      meta: { email, fullName, roles: normalizedRoles },
+    });
+
+    return res.status(201).json({ message: "Usuario creado", user });
+  } catch (err) {
+    console.error("registerCtrl error:", err);
+    return res
+      .status(getErrorStatus(err))
+      .json({ message: getErrorMessage(err, "Error del servidor") });
+  }
+}
+
+//  Paso 1: credenciales
 export async function loginStartCtrl(req, res) {
   const { email, password } = req.body;
 
   try {
-    const result = await startLogin({ email, password }); // servicio que crea/elimina el LoginCode y (posiblemente) envía el email
+    const result = await startLogin({ email, password });
 
-    // Si estamos en modo desarrollo/disabled, devolver también el código para facilitar pruebas
-    if (String(process.env.MAILER_DISABLED || 'false') === 'true') {
-      // Si el servicio devuelve el código en el body, lo incluimos en debugCode
-      if (result && result.code) {
-        console.log(`[DEV] Login code for ${email}: ${result.code}`);
-        return res.status(200).json({ ...result, debugCode: result.code });
-      }
+    await logAudit(req, {
+      actorId: result?.user?.id ?? null,
+      action: "AUTH_LOGIN_START_OK",
+      entity: "AUTH",
+      entityId: null,
+      meta: { email },
+    });
 
-      // fallback: loguear resultado y devolver éxito para permitir continuar con la verificación
-      console.log('[DEV] startLogin result (no code returned):', result);
-      return res.status(200).json({ message: result?.message || 'Código generado (dev)' });
+    const dev = String(process.env.MAILER_DISABLED || "false") === "true";
+    const test = String(process.env.TEST_MODE || "false") === "true";
+    const force = String(process.env.FORCE_RETURN_CODE || "false") === "true";
+
+    if ((dev || test || force) && result?.code) {
+      return res.status(200).json({ ...result, debugCode: result.code });
     }
 
-    return res.status(200).json(result); // comportamiento normal
+    return res.status(200).json(result);
   } catch (err) {
-    console.error('loginStart error:', err);
+    console.error("loginStart error:", err);
 
-    // Si el fallo es por SMTP y el desarrollador pidió desactivar el mailer, devolver éxito en dev
-    if (String(process.env.MAILER_DISABLED || 'false') === 'true') {
-      console.log(`[DEV] Ignoring error because MAILER_DISABLED=true: ${err.message}`);
-      return res.status(200).json({ message: 'Código generado (dev)' });
-    }
+    await logAudit(req, {
+      actorId: null,
+      action: "AUTH_LOGIN_START_FAIL",
+      entity: "AUTH",
+      entityId: null,
+      meta: { email, reason: err?.message || "UNKNOWN" },
+    });
 
-    // Responder error real en producción/si no está deshabilitado
-    return res.status(500).json({ message: err.message || 'Error del servidor' });
+    return res
+      .status(getErrorStatus(err))
+      .json({ message: getErrorMessage(err, "Error del servidor") });
   }
 }
 
-// Paso 2: verifica código, setea cookie y responde con user + session
+//  Paso 2: verifica código
 export async function loginVerifyCtrl(req, res) {
   const { email, code } = req.body;
-  const { token, profile} = await verifyLoginCodeAndIssueToken({ email, code });
 
-  // Cookie HttpOnly
-  res.cookie(COOKIE_NAME, token, cookieOptions());
+  try {
+    const { token, profile } = await verifyLoginCodeAndIssueToken({ email, code });
 
-  // Construir bloque de sesión a partir de los claims del token
-  const claims = verifyJwt(token);
-  const session = buildSessionFromClaims(claims);
+    await logAudit(req, {
+      actorId: profile?.id ?? null,
+      action: "AUTH_LOGIN_SUCCESS",
+      entity: "User",
+      entityId: profile?.id ?? null,
+      meta: { email },
+    });
 
-  return res.status(200).json({
-    message: 'Login OK',
-    user: profile,
-    session,
-  });
+    res.cookie(COOKIE_NAME, token, cookieOptions());
+
+    const claims = verifyJwt(token);
+    const session = buildSessionFromClaims(claims);
+
+    return res.status(200).json({
+      message: "Login OK",
+      user: profile,
+      session,
+    });
+  } catch (err) {
+    await logAudit(req, {
+      actorId: null,
+      action: "AUTH_LOGIN_FAIL",
+      entity: "AUTH",
+      entityId: null,
+      meta: { email, reason: err?.message || "INVALID_OR_EXPIRED_CODE" },
+    });
+
+    return res
+      .status(getErrorStatus(err, 401))
+      .json({ message: getErrorMessage(err, "Código inválido") });
+  }
 }
 
 export async function resendCodeCtrl(req, res) {
   const { email } = req.body;
-  await resendLoginCode(email);
-  return  res.json( { message: 'Código reenviado' } );
+
+  try {
+    const result = await resendLoginCode(email);
+
+    await logAudit(req, {
+      actorId: null,
+      action: "AUTH_RESEND_CODE",
+      entity: "AUTH",
+      entityId: null,
+      meta: { email },
+    });
+
+    return res.status(200).json(result);
+  } catch (err) {
+    return res
+      .status(getErrorStatus(err))
+      .json({ message: getErrorMessage(err, "No se pudo reenviar el código") });
+  }
 }
 
-// Perfil: devuelve un JSON limpio (sin iat/exp/sub crudos)
+// Perfil
 export async function meCtrl(req, res) {
-  const { id, email, fullName, roles, mustChangePassword, iat, exp } = req.user || {};
-  const session = buildSessionFromClaims({ iat, exp });
-  return res.status(200).json({
-    user: { id, email, fullName, roles, mustChangePassword },
-    session,
-  });
+  try {
+    if (!req.user) {
+      return res.status(401).json({ message: "No autenticado" });
+    }
+
+    const { id, email, fullName, roles, mustChangePassword, iat, exp } = req.user;
+    const session = buildSessionFromClaims({ iat, exp });
+
+    return res.status(200).json({
+      user: { id, email, fullName, roles, mustChangePassword },
+      session,
+    });
+  } catch (err) {
+    return res
+      .status(getErrorStatus(err))
+      .json({ message: getErrorMessage(err, "No se pudo obtener la sesión") });
+  }
 }
 
 export async function logoutCtrl(req, res) {
-  res.clearCookie(process.env.COOKIE_NAME || 'gp_token');
-  return res.status(200).json({ message: 'Logout OK' });
-}
+  try {
+    res.clearCookie(COOKIE_NAME, {
+      httpOnly: true,
+      sameSite:
+        (process.env.COOKIE_SAMESITE || "lax").toLowerCase() === "none"
+          ? "none"
+          : "lax",
+      secure: (process.env.COOKIE_SECURE || "false") === "true",
+      path: "/",
+    });
 
-// ===== Cambio de contraseña (primer login) =====
-export async function changePasswordCtrl(req, res) {
-  const userId = req.user?.id;
-  const { currentPassword, newPassword } = req.body;
+    await logAudit(req, {
+      actorId: req.user?.id ?? null,
+      action: "AUTH_LOGOUT",
+      entity: "User",
+      entityId: req.user?.id ?? null,
+      meta: { email: req.user?.email },
+    });
 
-  // 1) Actualiza la contraseña y limpia mustChangePassword
-  const profile = await changePasswordSvc({ userId, currentPassword, newPassword });
-
-  // 2) Reemitir JWT con mustChangePassword=false
-  const token = signJwt({
-    sub: String(profile.id),
-    id: profile.id,
-    email: profile.email,
-    fullName: profile.fullName,
-    roles: profile.roles,
-    mustChangePassword: profile.mustChangePassword, // ahora false
-  });
-
-  // 3) Actualizar cookie HttpOnly
-  res.cookie(COOKIE_NAME, token, cookieOptions());
-
-  // 4) Armar bloque de sesión
-  const claims = verifyJwt(token);
-  const session = buildSessionFromClaims(claims);
-
-  return res.status(200).json({
-    message: 'Contraseña actualizada',
-    user: profile,
-    session,
-  });
-}
-
-// ===== Recuperación de contraseña =====
-export async function requestPasswordResetCtrl(req, res) {
-  const { email } = req.body;
-  const result = await requestPasswordReset(email);
-  
-  // En dev/test, si hay debugCode, devolverlo
-  if (process.env.TEST_MODE === 'true' || process.env.MAILER_DISABLED === 'true') {
-    // Nota: el service genera el token, pero no lo devuelve por seguridad
-    // En test mode, necesitarías consultarlo desde la BD o modificar el service
-    console.log(`[DEV] Password reset requested for ${email}`);
+    return res.status(200).json({ message: "Logout OK" });
+  } catch (err) {
+    return res
+      .status(getErrorStatus(err))
+      .json({ message: getErrorMessage(err, "No se pudo cerrar sesión") });
   }
+}
 
-  return res.status(200).json(result);
+// Cambio de contraseña
+export async function changePasswordCtrl(req, res) {
+  try {
+    const userId = req.user?.id;
+    const { currentPassword, newPassword } = req.body;
+
+    const profile = await changePasswordSvc({ userId, currentPassword, newPassword });
+
+    const token = signJwt({
+      sub: String(profile.id),
+      id: profile.id,
+      email: profile.email,
+      fullName: profile.fullName,
+      roles: profile.roles,
+      mustChangePassword: profile.mustChangePassword,
+    });
+
+    res.cookie(COOKIE_NAME, token, cookieOptions());
+
+    const claims = verifyJwt(token);
+    const session = buildSessionFromClaims(claims);
+
+    await logAudit(req, {
+      actorId: profile?.id ?? userId ?? null,
+      action: "AUTH_PASSWORD_CHANGE",
+      entity: "User",
+      entityId: profile?.id ?? userId ?? null,
+      meta: { email: profile?.email },
+    });
+
+    return res.status(200).json({
+      message: "Contraseña actualizada",
+      user: profile,
+      session,
+    });
+  } catch (err) {
+    return res
+      .status(getErrorStatus(err))
+      .json({ message: getErrorMessage(err, "No se pudo cambiar la contraseña") });
+  }
+}
+
+//  Recuperación de contraseña
+export async function requestPasswordResetCtrl(req, res) {
+  try {
+    const { email } = req.body;
+
+    await logAudit(req, {
+      actorId: null,
+      action: "AUTH_PASSWORD_RESET_REQUEST",
+      entity: "AUTH",
+      entityId: null,
+      meta: { email },
+    });
+
+    const result = await requestPasswordReset(email);
+
+    return res.status(200).json(result);
+  } catch (err) {
+    return res
+      .status(getErrorStatus(err))
+      .json({
+        message: getErrorMessage(err, "No se pudo solicitar la recuperación"),
+      });
+  }
 }
 
 export async function resetPasswordCtrl(req, res) {
-  const { email, token, newPassword } = req.body;
-  const result = await resetPassword({ email, token, newPassword });
-  return res.status(200).json(result);
+  try {
+    const { email, token, newPassword } = req.body;
+    const result = await resetPassword({ email, token, newPassword });
+
+    await logAudit(req, {
+      actorId: null,
+      action: "AUTH_PASSWORD_RESET_SUCCESS",
+      entity: "AUTH",
+      entityId: null,
+      meta: { email },
+    });
+
+    return res.status(200).json(result);
+  } catch (err) {
+    return res
+      .status(getErrorStatus(err))
+      .json({
+        message: getErrorMessage(err, "No se pudo restablecer la contraseña"),
+      });
+  }
 }

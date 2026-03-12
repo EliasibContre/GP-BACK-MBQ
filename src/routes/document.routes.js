@@ -1,6 +1,8 @@
+// routes/document.routes.js
 import { Router } from 'express';
 import multer from 'multer';
 import { requireAuth } from '../middlewares/requireAuth.js';
+import { multerErrorHandler } from '../middlewares/multerErrorHandler.js';
 import {
   getDocumentTypes,
   getMyDocuments,
@@ -13,7 +15,7 @@ const router = Router();
 // Configurar multer para múltiples archivos
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB por archivo
+  limits: { fileSize: 30 * 1024 * 1024 }, // 30MB por archivo
   fileFilter: (req, file, cb) => {
     if (file.mimetype === 'application/pdf') {
       cb(null, true);
@@ -34,6 +36,7 @@ router.post(
   '/me',
   requireAuth,
   upload.any(), // Acepta cualquier cantidad de archivos con diferentes nombres
+  multerErrorHandler, // Manejar errores de multer
   uploadDocuments
 );
 

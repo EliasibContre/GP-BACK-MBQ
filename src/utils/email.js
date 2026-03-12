@@ -1,20 +1,40 @@
-// src/utils/email.js
-import { mailer } from '../config/mailer.js';
+// utils/email.js
+import { mailer } from "../config/mailer.js";
 
-const FROM = process.env.MAIL_FROM || 'MBQ Proveedores <no-reply@mbqinc.com>';
+const FROM = process.env.MAIL_FROM || "MBQ Proveedores <no-reply@mbqinc.com>";
 
 async function logMailInfo(info) {
-  console.log('Mail enviado:', { messageId: info?.messageId, response: info?.response });
+  console.log("Mail enviado:", {
+    messageId: info?.messageId,
+    response: info?.response,
+  });
+
   try {
-    const nodemailer = await import('nodemailer');
+    const nodemailer = await import("nodemailer");
     const preview = nodemailer.getTestMessageUrl(info);
-    if (preview) console.log('Preview URL:', preview);
-  } catch (e) { /* ignore */ }
+    if (preview) console.log("Preview URL:", preview);
+  } catch {
+    // ignore
+  }
 }
 
-export async function sendLoginCodeEmail(to, code) {
-  const subject = 'Tu código de acceso';
-  const text = `Tu código de acceso es: ${code}\n\nEste código expira en unos minutos. Si no lo solicitaste, ignora este correo.`;
+async function send({ to, subject, text, html }) {
+  try {
+    const info = await mailer.sendMail({ from: FROM, to, subject, text, html });
+    await logMailInfo(info);
+    return info;
+  } catch (err) {
+    console.error("Error enviando email:", err?.message || err);
+    throw err;
+  }
+}
+
+export function sendLoginCodeEmail(to, code) {
+  const subject = "Tu código de acceso";
+  const text =
+    `Tu código de acceso es: ${code}\n\n` +
+    `Este código expira en unos minutos. Si no lo solicitaste, ignora este correo.`;
+
   const html = `
     <div style="font-family:system-ui,Arial,sans-serif;line-height:1.5">
       <h2>Tu código de acceso</h2>
@@ -24,19 +44,16 @@ export async function sendLoginCodeEmail(to, code) {
     </div>
   `;
 
-  try {
-    const info = await mailer.sendMail({ from: FROM, to, subject, text, html });
-    await logMailInfo(info);
-    return info;
-  } catch (err) {
-    console.error('Error enviando login code email:', err.message || err);
-    throw err;
-  }
+  return send({ to, subject, text, html });
 }
 
-export async function sendPasswordResetEmail(to, code) {
-  const subject = 'Código para restablecer tu contraseña';
-  const text = `Tu código de recuperación es: ${code}\n\nÚsalo para restablecer tu contraseña. Este código expira en 15 minutos.\n\nSi no solicitaste esto, ignora este correo.`;
+export function sendPasswordResetEmail(to, code) {
+  const subject = "Código para restablecer tu contraseña";
+  const text =
+    `Tu código de recuperación es: ${code}\n\n` +
+    `Úsalo para restablecer tu contraseña. Este código expira en 15 minutos.\n\n` +
+    `Si no solicitaste esto, ignora este correo.`;
+
   const html = `
     <div style="font-family:system-ui,Arial,sans-serif;line-height:1.5">
       <h2>Restablecer contraseña</h2>
@@ -47,19 +64,15 @@ export async function sendPasswordResetEmail(to, code) {
     </div>
   `;
 
-  try {
-    const info = await mailer.sendMail({ from: FROM, to, subject, text, html });
-    await logMailInfo(info);
-    return info;
-  } catch (err) {
-    console.error('Error enviando password reset email:', err.message || err);
-    throw err;
-  }
+  return send({ to, subject, text, html });
 }
 
-export async function sendTemporaryPasswordEmail(to, tempPassword) {
-  const subject = 'Tu contraseña temporal';
-  const text = `Se generó una contraseña temporal: ${tempPassword}\n\nPor seguridad, inicia sesión y cámbiala de inmediato.`;
+export function sendTemporaryPasswordEmail(to, tempPassword) {
+  const subject = "Tu contraseña temporal";
+  const text =
+    `Se generó una contraseña temporal: ${tempPassword}\n\n` +
+    `Por seguridad, inicia sesión y cámbiala de inmediato.`;
+
   const html = `
     <div style="font-family:system-ui,Arial,sans-serif;line-height:1.5">
       <h2>Contraseña temporal</h2>
@@ -69,20 +82,16 @@ export async function sendTemporaryPasswordEmail(to, tempPassword) {
     </div>
   `;
 
-  try {
-    const info = await mailer.sendMail({ from: FROM, to, subject, text, html });
-    await logMailInfo(info);
-    return info;
-  } catch (err) {
-    console.error('Error enviando temporary password email:', err.message || err);
-    throw err;
-  }
+  return send({ to, subject, text, html });
 }
 
-export async function sendAccessRequestAckEmail(to, kind) {
-  const typeLabel = kind === 'INTERNAL' ? 'usuario' : 'proveedor';
-  const subject = 'Solicitud de acceso recibida';
-  const text = `Tu solicitud de acceso como ${typeLabel} ha sido recibida.\n\nNos pondremos en contacto pronto para completar el proceso.`;
+export function sendAccessRequestAckEmail(to, kind) {
+  const typeLabel = kind === "INTERNAL" ? "usuario" : "proveedor";
+  const subject = "Solicitud de acceso recibida";
+  const text =
+    `Tu solicitud de acceso como ${typeLabel} ha sido recibida.\n\n` +
+    `Nos pondremos en contacto pronto para completar el proceso.`;
+
   const html = `
     <div style="font-family:system-ui,Arial,sans-serif;line-height:1.5">
       <h2>Solicitud recibida</h2>
@@ -92,19 +101,13 @@ export async function sendAccessRequestAckEmail(to, kind) {
     </div>
   `;
 
-  try {
-    const info = await mailer.sendMail({ from: FROM, to, subject, text, html });
-    await logMailInfo(info);
-    return info;
-  } catch (err) {
-    console.error('Error enviando access request ack email:', err.message || err);
-    throw err;
-  }
+  return send({ to, subject, text, html });
 }
 
-export async function sendAccessRequestRejectedEmail(to, reason) {
-  const subject = 'Tu solicitud de acceso ha sido rechazada';
+export function sendAccessRequestRejectedEmail(to, reason) {
+  const subject = "Tu solicitud de acceso ha sido rechazada";
   const text = `Lamentablemente, tu solicitud de acceso ha sido rechazada.\n\nMotivo: ${reason}`;
+
   const html = `
     <div style="font-family:system-ui,Arial,sans-serif;line-height:1.5">
       <h2>Solicitud rechazada</h2>
@@ -115,41 +118,29 @@ export async function sendAccessRequestRejectedEmail(to, reason) {
     </div>
   `;
 
-  try {
-    const info = await mailer.sendMail({ from: FROM, to, subject, text, html });
-    await logMailInfo(info);
-    return info;
-  } catch (err) {
-    console.error('Error enviando access request rejected email:', err.message || err);
-    throw err;
-  }
+  return send({ to, subject, text, html });
 }
 
-export async function sendPurchaseOrderApprovedEmail(to, order) {
+export function sendPurchaseOrderApprovedEmail(to, order) {
   const subject = `Orden ${order.number} aprobada`;
-  const text = `Tu orden ${order.number} por ${order.total || ''} ha sido aprobada.`;
+  const text = `Tu orden ${order.number} por ${order.total || ""} ha sido aprobada.`;
+
   const html = `
     <div style="font-family:system-ui,Arial,sans-serif;line-height:1.5">
       <h2>Orden aprobada</h2>
       <p>La orden <strong>${order.number}</strong> ha sido aprobada.</p>
-      <p><strong>Monto:</strong> ${order.total || ''}</p>
+      <p><strong>Monto:</strong> ${order.total || ""}</p>
       <p>Si necesitas más información, consulta tu panel de proveedor.</p>
     </div>
   `;
 
-  try {
-    const info = await mailer.sendMail({ from: FROM, to, subject, text, html });
-    await logMailInfo(info);
-    return info;
-  } catch (err) {
-    console.error('Error enviando purchase order approved email:', err.message || err);
-    throw err;
-  }
+  return send({ to, subject, text, html });
 }
 
-export async function sendPurchaseOrderRejectedEmail(to, order, reason) {
+export function sendPurchaseOrderRejectedEmail(to, order, reason) {
   const subject = `Orden ${order.number} rechazada`;
   const text = `Tu orden ${order.number} ha sido rechazada. Motivo: ${reason}`;
+
   const html = `
     <div style="font-family:system-ui,Arial,sans-serif;line-height:1.5">
       <h2>Orden rechazada</h2>
@@ -160,19 +151,13 @@ export async function sendPurchaseOrderRejectedEmail(to, order, reason) {
     </div>
   `;
 
-  try {
-    const info = await mailer.sendMail({ from: FROM, to, subject, text, html });
-    await logMailInfo(info);
-    return info;
-  } catch (err) {
-    console.error('Error enviando purchase order rejected email:', err.message || err);
-    throw err;
-  }
+  return send({ to, subject, text, html });
 }
 
-export async function sendDocumentApprovedEmail(to, docType, providerName) {
+export function sendDocumentApprovedEmail(to, docType) {
   const subject = `Documento ${docType} aprobado`;
   const text = `Tu documento ${docType} ha sido aprobado.`;
+
   const html = `
     <div style="font-family:system-ui,Arial,sans-serif;line-height:1.5">
       <h2>Documento aprobado</h2>
@@ -181,19 +166,13 @@ export async function sendDocumentApprovedEmail(to, docType, providerName) {
     </div>
   `;
 
-  try {
-    const info = await mailer.sendMail({ from: FROM, to, subject, text, html });
-    await logMailInfo(info);
-    return info;
-  } catch (err) {
-    console.error('Error enviando document approved email:', err.message || err);
-    throw err;
-  }
+  return send({ to, subject, text, html });
 }
 
-export async function sendDocumentRejectedEmail(to, docType, reason) {
+export function sendDocumentRejectedEmail(to, docType, reason) {
   const subject = `Documento ${docType} rechazado`;
   const text = `Tu documento ${docType} ha sido rechazado. Motivo: ${reason}`;
+
   const html = `
     <div style="font-family:system-ui,Arial,sans-serif;line-height:1.5">
       <h2>Documento rechazado</h2>
@@ -204,44 +183,49 @@ export async function sendDocumentRejectedEmail(to, docType, reason) {
     </div>
   `;
 
-  try {
-    const info = await mailer.sendMail({ from: FROM, to, subject, text, html });
-    await logMailInfo(info);
-    return info;
-  } catch (err) {
-    console.error('Error enviando document rejected email:', err.message || err);
-    throw err;
-  }
+  return send({ to, subject, text, html });
 }
 
-export async function sendPaymentRegisteredEmail(to, payment, purchaseOrder) {
+export function sendPaymentRegisteredEmail(to, payment, purchaseOrder) {
   const subject = `Pago registrado - Orden ${purchaseOrder.number}`;
   const text = `Se ha registrado un pago por ${payment.amount} para la orden ${purchaseOrder.number}.`;
+
   const html = `
     <div style="font-family:system-ui,Arial,sans-serif;line-height:1.5">
       <h2>Pago registrado</h2>
       <p>Se ha registrado un pago para la orden <strong>${purchaseOrder.number}</strong>.</p>
-      <p><strong>Proveedor:</strong> ${purchaseOrder.provider?.businessName || ''}</p>
+      <p><strong>Proveedor:</strong> ${purchaseOrder.provider?.businessName || ""}</p>
       <p><strong>Monto:</strong> ${payment.amount}</p>
       <p><strong>Fecha de pago:</strong> ${new Date(payment.paidAt).toLocaleDateString()}</p>
       <p>Si tienes dudas, contacta al área de finanzas.</p>
     </div>
   `;
 
-  try {
-    const info = await mailer.sendMail({ from: FROM, to, subject, text, html });
-    await logMailInfo(info);
-    return info;
-  } catch (err) {
-    console.error('Error enviando payment registered email:', err.message || err);
-    throw err;
-  }
+  return send({ to, subject, text, html });
 }
 
-export async function sendProviderWelcomeEmail(to, provider, tempPassword, personType) {
-  const subject = 'Alta de proveedor - Acceso al portal';
-  const tipo = personType === 'FISICA' ? 'Persona Física' : personType === 'MORAL' ? 'Persona Moral' : 'Proveedor';
-  const text = `Bienvenido/a ${provider.businessName}\n\nTu registro como ${tipo} fue creado.\nRFC: ${provider.rfc}\nContraseña temporal: ${tempPassword}\n\nInicia sesión y cambia tu contraseña inmediatamente.\nSi no solicistaste este acceso contacta al administrador.`;
+export function sendProviderWelcomeEmail(
+  to,
+  provider,
+  tempPassword,
+  personType,
+) {
+  const subject = "Alta de proveedor - Acceso al portal";
+  const tipo =
+    personType === "FISICA"
+      ? "Persona Física"
+      : personType === "MORAL"
+        ? "Persona Moral"
+        : "Proveedor";
+
+  const text =
+    `Bienvenido/a ${provider.businessName}\n\n` +
+    `Tu registro como ${tipo} fue creado.\n` +
+    `RFC: ${provider.rfc}\n` +
+    `Contraseña temporal: ${tempPassword}\n\n` +
+    `Inicia sesión y cambia tu contraseña inmediatamente.\n` +
+    `Si no solicitaste este acceso contacta al administrador.`;
+
   const html = `
     <div style="font-family:system-ui,Arial,sans-serif;line-height:1.5">
       <h2>Bienvenido/a</h2>
@@ -254,12 +238,68 @@ export async function sendProviderWelcomeEmail(to, provider, tempPassword, perso
       <p style="margin-top:20px;font-size:12px;color:#666">Si no solicitaste este acceso, contacta al administrador.</p>
     </div>
   `;
-  try {
-    const info = await mailer.sendMail({ from: FROM, to, subject, text, html });
-    await logMailInfo(info);
-    return info;
-  } catch (err) {
-    console.error('Error enviando provider welcome email:', err.message || err);
-    throw err;
-  }
+
+  return send({ to, subject, text, html });
+}
+
+export function sendPlatformNotificationEmail(to, notification) {
+  const subject = notification?.title
+    ? `Notificación: ${notification.title}`
+    : "Nueva notificación en MBQ Proveedores";
+
+  const safeTitle = notification?.title || "Nueva notificación";
+  const safeMessage =
+    notification?.message || "Tienes una nueva notificación en la plataforma.";
+
+  const text =
+    `${safeTitle}\n\n` +
+    `${safeMessage}\n\n` +
+    `Ingresa a la plataforma para revisar el detalle.`;
+
+  const html = `
+    <div style="font-family:system-ui,Arial,sans-serif;line-height:1.5;color:#111">
+      <h2 style="margin-bottom:8px;">${safeTitle}</h2>
+      <p style="margin:0 0 12px 0;">${safeMessage}</p>
+
+      <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:14px;margin:16px 0;">
+        <p style="margin:0;">
+          Tienes una nueva notificación en <strong>MBQ Proveedores</strong>.
+        </p>
+      </div>
+
+      <p style="margin-top:16px;">
+        Ingresa a la plataforma para revisar el detalle.
+      </p>
+
+      <p style="margin-top:20px;font-size:12px;color:#666;">
+        Este es un correo automático de notificación.
+      </p>
+    </div>
+  `;
+
+  return send({ to, subject, text, html });
+}
+
+export function sendRoleAlertEmail(to, subject, title, message) {
+  const text =
+    `${title}\n\n` +
+    `${message}\n\n` +
+    `Ingresa a la plataforma MBQ Proveedores para revisar el detalle.`;
+
+  const html = `
+    <div style="font-family:system-ui,Arial,sans-serif;line-height:1.5;color:#111">
+      <h2 style="margin-bottom:8px;">${title}</h2>
+      <p style="margin:0 0 12px 0;">${message}</p>
+      <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:14px;margin:16px 0;">
+        <p style="margin:0;">
+          Este aviso fue generado automáticamente por <strong>MBQ Proveedores</strong>.
+        </p>
+      </div>
+      <p style="margin-top:16px;">
+        Ingresa a la plataforma para revisar y dar seguimiento.
+      </p>
+    </div>
+  `;
+
+  return send({ to, subject, text, html });
 }

@@ -1,6 +1,65 @@
-import { prisma } from '../config/prisma.js';
-import { createNotification } from '../services/notification.service.js';
-import { sendPaymentRegisteredEmail } from '../utils/email.js';
+// src/controllers/payment.controller.js
+import { prisma } from "../config/prisma.js";
+import { supabase } from "../config/supabase.js";
+import { createNotification } from "../services/notification.service.js";
+import { notifyRoles } from "../services/roleAlerts.service.js";
+import { sendPaymentRegisteredEmail } from "../utils/email.js";
+import { logAudit } from "../utils/audit.js";
+
+const SIGNED_URL_EXPIRES = Number(process.env.SIGNED_URL_EXPIRES || 3600);
+
+async function attachSignedUrlToEvidence(evidence) {
+  if (!evidence) return evidence;
+
+  let url = null;
+
+  try {
+    if (evidence.bucket && evidence.path) {
+      const { data, error } = await supabase.storage
+        .from(evidence.bucket)
+        .createSignedUrl(evidence.path, SIGNED_URL_EXPIRES);
+
+      if (!error) {
+        url = data?.signedUrl || null;
+      } else {
+        console.warn(
+          "No se pudo firmar URL de evidencia:",
+          evidence.id,
+          error.message
+        );
+      }
+    }
+  } catch (err) {
+    console.warn(
+      "Error generando signed URL para evidencia:",
+      evidence?.id,
+      err?.message || err
+    );
+  }
+
+  return {
+    ...evidence,
+    url,
+  };
+}
+
+async function attachSignedUrlsToEvidences(evidences = []) {
+  return Promise.all((evidences || []).map(attachSignedUrlToEvidence));
+}
+
+async function attachSignedUrlsToPayment(payment) {
+  if (!payment) return payment;
+
+  const evidences = await attachSignedUrlsToEvidences(payment.evidences || []);
+  return {
+    ...payment,
+    evidences,
+  };
+}
+
+async function attachSignedUrlsToPayments(payments = []) {
+  return Promise.all((payments || []).map(attachSignedUrlsToPayment));
+}
 
 /**
  * Crear un nuevo pago
@@ -8,71 +67,100 @@ import { sendPaymentRegisteredEmail } from '../utils/email.js';
  */
 export async function createPayment(req, res) {
   try {
-    const { purchaseOrderId, amount, paidAt, method, reference } = req.body;
+    const {
+      purchaseOrderId,
+      amount,
+      paidAt,
+      closeAt,
+      method,
+      reference,
+      isScheduled,
+      installmentNo,
+      installmentOf,
+    } = req.body;
+
     const userId = req.user?.id;
     const roles = (req.user && req.user.roles) || [];
-    const isProviderRole = roles.some(r => String(r.name).toUpperCase() === 'PROVIDER');
+    const isProviderRole = roles.some(
+      (r) => String(r.name).toUpperCase() === "PROVIDER"
+    );
 
-    // Validar campos requeridos
     if (!purchaseOrderId || !amount || !paidAt) {
-      return res.status(400).json({ 
-        error: 'purchaseOrderId, amount y paidAt son requeridos' 
+      return res.status(400).json({
+        error: "purchaseOrderId, amount y paidAt son requeridos",
       });
     }
 
-    // Validar que la orden existe (incluye contacto del proveedor)
     const po = await prisma.purchaseOrder.findUnique({
       where: { id: parseInt(purchaseOrderId) },
-      include: { provider: { select: { id: true, businessName: true, emailContacto: true, contacts: { select: { email: true } } } } }
+      include: {
+        provider: {
+          select: {
+            id: true,
+            businessName: true,
+            emailContacto: true,
+            contacts: { select: { email: true } },
+          },
+        },
+      },
     });
 
     if (!po) {
-      return res.status(404).json({ error: 'Orden de compra no encontrada' });
+      return res.status(404).json({ error: "Orden de compra no encontrada" });
     }
 
-    if (po.status !== 'APPROVED') {
+    if (po.status !== "APPROVED") {
       return res.status(400).json({
-        error: 'Solo se pueden pagar órdenes aprobadas (APPROVED)',
-        currentStatus: po.status
+        error: "Solo se pueden pagar órdenes aprobadas (APPROVED)",
+        currentStatus: po.status,
       });
     }
 
-    // Si es proveedor en sesión, validar que la orden le pertenece
     if (isProviderRole) {
       const provider = await prisma.provider.findFirst({
-        where: { emailContacto: req.user.email, isActive: true, deletedAt: null },
-        select: { id: true }
+        where: {
+          emailContacto: req.user.email,
+          isActive: true,
+          deletedAt: null,
+        },
+        select: { id: true },
       });
+
       if (!provider || provider.id !== po.provider.id) {
-        return res.status(403).json({ error: 'No puedes registrar pagos para órdenes de otro proveedor' });
+        return res.status(403).json({
+          error: "No puedes registrar pagos para órdenes de otro proveedor",
+        });
       }
     }
 
-    // Validar que no exista un pago duplicado en la misma fecha
     const existingPayment = await prisma.payment.findFirst({
       where: {
         purchaseOrderId: parseInt(purchaseOrderId),
         paidAt: {
           gte: new Date(new Date(paidAt).setHours(0, 0, 0, 0)),
-          lte: new Date(new Date(paidAt).setHours(23, 59, 59, 999))
-        }
-      }
+          lte: new Date(new Date(paidAt).setHours(23, 59, 59, 999)),
+        },
+      },
     });
 
     if (existingPayment) {
       return res.status(400).json({
-        error: 'Ya existe un pago registrado para esta orden en esta fecha'
+        error: "Ya existe un pago registrado para esta orden en esta fecha",
       });
     }
 
-    // Crear pago
     const payment = await prisma.payment.create({
       data: {
         purchaseOrderId: parseInt(purchaseOrderId),
         amount: parseFloat(amount),
         paidAt: new Date(paidAt),
-        method: method || 'TRANSFER',
-        reference: reference || null
+        closeAt: closeAt ? new Date(closeAt) : null,
+        method: method ?? null,
+        reference: reference ?? null,
+        createdById: userId ?? null,
+        installmentNo: installmentNo != null ? parseInt(installmentNo) : null,
+        installmentOf: installmentOf != null ? parseInt(installmentOf) : null,
+        isScheduled: Boolean(isScheduled),
       },
       include: {
         purchaseOrder: {
@@ -80,47 +168,66 @@ export async function createPayment(req, res) {
             id: true,
             number: true,
             total: true,
-            provider: { select: { id: true, businessName: true } }
-          }
-        }
-      }
+            provider: { select: { id: true, businessName: true } },
+          },
+        },
+      },
     });
 
-    // Registrar en auditoría
     await prisma.auditLog.create({
       data: {
         actorId: userId,
-        action: 'CREATE_PAYMENT',
-        entity: 'Payment',
+        action: "CREATE_PAYMENT",
+        entity: "Payment",
         entityId: payment.id,
         meta: {
-          purchaseOrderId,
+          purchaseOrderId: parseInt(purchaseOrderId),
           amount: parseFloat(amount),
-          method: method || 'TRANSFER',
-          providerName: po.provider.businessName
-        }
-      }
+          closeAt: closeAt ?? null,
+          method: method ?? null,
+          reference: reference ?? null,
+          isScheduled: Boolean(isScheduled),
+          providerName: po.provider.businessName,
+          installmentNo: installmentNo != null ? parseInt(installmentNo) : null,
+          installmentOf: installmentOf != null ? parseInt(installmentOf) : null,
+        },
+      },
     });
 
-    console.log(`✅ Pago creado: OC ${po.number}, Monto $${amount}`);
+    await logAudit(req, {
+      actorId: userId ?? null,
+      action: "PAYMENT_CREATE",
+      entity: "Payment",
+      entityId: payment.id,
+      meta: {
+        purchaseOrderId: parseInt(purchaseOrderId),
+        amount: parseFloat(amount),
+        closeAt: closeAt ?? null,
+        method: method ?? null,
+        reference: reference ?? null,
+        providerName: po.provider.businessName,
+        installmentNo: installmentNo != null ? parseInt(installmentNo) : null,
+        installmentOf: installmentOf != null ? parseInt(installmentOf) : null,
+      },
+    });
 
     res.status(201).json({
-      message: 'Pago registrado correctamente',
-      payment
+      message: "Pago registrado correctamente",
+      payment,
     });
-    
-    // Crear notificaciones internas (usuarios de finanzas / administradores)
+
     try {
-      // Buscar usuarios con rol FINANZAS; si no hay, fallback a ADMIN/APPROVER
       let financeUsers = await prisma.user.findMany({
-        where: { roles: { some: { role: { name: 'FINANZAS' } } } },
-        select: { id: true, email: true }
+        where: { roles: { some: { role: { name: "FINANZAS" } } } },
+        select: { id: true, email: true },
       });
 
       if (!financeUsers || financeUsers.length === 0) {
         financeUsers = await prisma.user.findMany({
-          where: { roles: { some: { role: { name: { in: ['ADMIN', 'APPROVER'] } } } } },
-          select: { id: true, email: true }
+          where: {
+            roles: { some: { role: { name: { in: ["ADMIN", "APPROVER"] } } } },
+          },
+          select: { id: true, email: true },
         });
       }
 
@@ -130,45 +237,70 @@ export async function createPayment(req, res) {
       for (const u of financeUsers) {
         await createNotification({
           userId: u.id,
-          type: 'PAYMENT_CREATED',
-          entityType: 'PAYMENT',
+          type: "PAYMENT_CREATED",
+          entityType: "PAYMENT",
           entityId: payment.id,
           title,
           message,
-          data: { paymentId: payment.id, purchaseOrderId: po.id, amount }
+          data: {
+            paymentId: payment.id,
+            purchaseOrderId: po.id,
+            amount,
+            installmentNo: payment.installmentNo,
+            installmentOf: payment.installmentOf,
+          },
+          sendEmail: false,
         });
       }
 
-      // Notificar al proveedor por notificación + correo si tiene email
-      const providerEmail = po.provider?.emailContacto || (po.provider?.contacts && po.provider.contacts[0]?.email);
+      const providerEmail =
+        po.provider?.emailContacto ||
+        (po.provider?.contacts && po.provider.contacts[0]?.email);
+
       if (providerEmail) {
-        // Create a notification if we have an associated user for provider (best-effort: try match by email)
-        const providerUser = await prisma.user.findUnique({ where: { email: providerEmail } });
+        const providerUser = await prisma.user.findUnique({
+          where: { email: providerEmail },
+        });
+
         if (providerUser) {
           await createNotification({
             userId: providerUser.id,
-            type: 'PAYMENT_CREATED',
-            entityType: 'PAYMENT',
+            type: "PAYMENT_CREATED",
+            entityType: "PAYMENT",
             entityId: payment.id,
             title: `Pago recibido - OC ${po.number}`,
             message: `Se registró el pago de ${amount} para la orden ${po.number}.`,
-            data: { paymentId: payment.id, purchaseOrderId: po.id, amount }
+            data: {
+              paymentId: payment.id,
+              purchaseOrderId: po.id,
+              amount,
+              installmentNo: payment.installmentNo,
+              installmentOf: payment.installmentOf,
+            },
+            sendEmail: false,
           });
         }
 
-        // Enviar correo al proveedor
         try {
           await sendPaymentRegisteredEmail(providerEmail, payment, po);
         } catch (mailErr) {
-          console.warn('No se pudo enviar email al proveedor:', mailErr.message || mailErr);
+          console.warn(
+            "No se pudo enviar email al proveedor:",
+            mailErr.message || mailErr
+          );
         }
       }
     } catch (notifyErr) {
-      console.error('Error creando notificaciones / correos tras crear pago:', notifyErr);
+      console.error(
+        "Error creando notificaciones / correos tras crear pago:",
+        notifyErr
+      );
     }
   } catch (error) {
-    console.error('Error createPayment:', error);
-    res.status(500).json({ error: 'Error al registrar pago', detail: error.message });
+    console.error("Error createPayment:", error);
+    res
+      .status(500)
+      .json({ error: "Error al registrar pago", detail: error.message });
   }
 }
 
@@ -184,11 +316,11 @@ export async function updatePayment(req, res) {
 
     const payment = await prisma.payment.findUnique({
       where: { id: parseInt(id) },
-      include: { purchaseOrder: { select: { number: true } } }
+      include: { purchaseOrder: { select: { number: true } } },
     });
 
     if (!payment) {
-      return res.status(404).json({ error: 'Pago no encontrado' });
+      return res.status(404).json({ error: "Pago no encontrado" });
     }
 
     const updateData = {};
@@ -198,7 +330,7 @@ export async function updatePayment(req, res) {
     if (reference !== undefined) updateData.reference = reference;
 
     if (Object.keys(updateData).length === 0) {
-      return res.status(400).json({ error: 'No hay campos para actualizar' });
+      return res.status(400).json({ error: "No hay campos para actualizar" });
     }
 
     const updatedPayment = await prisma.payment.update({
@@ -210,30 +342,39 @@ export async function updatePayment(req, res) {
             id: true,
             number: true,
             total: true,
-            provider: { select: { businessName: true } }
-          }
-        }
-      }
+            provider: { select: { businessName: true } },
+          },
+        },
+      },
     });
 
-    // Registrar en auditoría
     await prisma.auditLog.create({
       data: {
         actorId: userId,
-        action: 'UPDATE_PAYMENT',
-        entity: 'Payment',
+        action: "UPDATE_PAYMENT",
+        entity: "Payment",
         entityId: parseInt(id),
-        meta: { updatedFields: Object.keys(updateData) }
-      }
+        meta: { updatedFields: Object.keys(updateData) },
+      },
+    });
+
+    await logAudit(req, {
+      actorId: userId ?? null,
+      action: "PAYMENT_UPDATE",
+      entity: "Payment",
+      entityId: parseInt(id),
+      meta: { updatedFields: Object.keys(updateData) },
     });
 
     res.json({
-      message: 'Pago actualizado correctamente',
-      payment: updatedPayment
+      message: "Pago actualizado correctamente",
+      payment: updatedPayment,
     });
   } catch (error) {
-    console.error('Error updatePayment:', error);
-    res.status(500).json({ error: 'Error al actualizar pago', detail: error.message });
+    console.error("Error updatePayment:", error);
+    res
+      .status(500)
+      .json({ error: "Error al actualizar pago", detail: error.message });
   }
 }
 
@@ -248,37 +389,54 @@ export async function deletePayment(req, res) {
 
     const payment = await prisma.payment.findUnique({
       where: { id: parseInt(id) },
-      include: { purchaseOrder: { select: { number: true, provider: { select: { businessName: true } } } } }
+      include: {
+        purchaseOrder: {
+          select: {
+            number: true,
+            provider: { select: { businessName: true } },
+          },
+        },
+      },
     });
 
     if (!payment) {
-      return res.status(404).json({ error: 'Pago no encontrado' });
+      return res.status(404).json({ error: "Pago no encontrado" });
     }
 
     await prisma.payment.delete({
-      where: { id: parseInt(id) }
+      where: { id: parseInt(id) },
     });
 
-    // Registrar en auditoría
     await prisma.auditLog.create({
       data: {
         actorId: userId,
-        action: 'DELETE_PAYMENT',
-        entity: 'Payment',
+        action: "DELETE_PAYMENT",
+        entity: "Payment",
         entityId: parseInt(id),
         meta: {
           purchaseOrderNumber: payment.purchaseOrder.number,
-          providerName: payment.purchaseOrder.provider.businessName
-        }
-      }
+          providerName: payment.purchaseOrder.provider.businessName,
+        },
+      },
     });
 
-    console.log(`🗑️ Pago eliminado: OC ${payment.purchaseOrder.number}`);
+    await logAudit(req, {
+      actorId: userId ?? null,
+      action: "PAYMENT_DELETE",
+      entity: "Payment",
+      entityId: parseInt(id),
+      meta: {
+        purchaseOrderNumber: payment.purchaseOrder.number,
+        providerName: payment.purchaseOrder.provider.businessName,
+      },
+    });
 
-    res.json({ message: 'Pago eliminado correctamente' });
+    res.json({ message: "Pago eliminado correctamente" });
   } catch (error) {
-    console.error('Error deletePayment:', error);
-    res.status(500).json({ error: 'Error al eliminar pago', detail: error.message });
+    console.error("Error deletePayment:", error);
+    res
+      .status(500)
+      .json({ error: "Error al eliminar pago", detail: error.message });
   }
 }
 
@@ -291,9 +449,19 @@ export async function listPayments(req, res) {
     const { purchaseOrderId, from, to, limit = 50, offset = 0 } = req.query;
 
     const where = {};
+    const roles = (req.user?.roles || []).map((r) =>
+      typeof r === "string" ? r.toUpperCase() : String(r?.name || "").toUpperCase()
+    );
+
+    const isAdminOrApprover =
+      roles.includes("ADMIN") || roles.includes("APPROVER");
+
+    if (!isAdminOrApprover) {
+      return res.status(403).json({ error: "No autorizado para listar pagos" });
+    }
 
     if (purchaseOrderId) {
-      where.purchaseOrderId = parseInt(purchaseOrderId);
+      where.purchaseOrderId = parseInt(purchaseOrderId, 10);
     }
 
     if (from || to) {
@@ -312,36 +480,37 @@ export async function listPayments(req, res) {
               number: true,
               status: true,
               total: true,
-              receivedAt: true,
               provider: {
                 select: {
                   id: true,
                   businessName: true,
-                  rfc: true
-                }
-              }
-            }
-          }
+                },
+              },
+            },
+          },
         },
-        orderBy: { paidAt: 'desc' },
-        take: parseInt(limit),
-        skip: parseInt(offset)
+        orderBy: { paidAt: "desc" },
+        take: parseInt(limit, 10),
+        skip: parseInt(offset, 10),
       }),
-      prisma.payment.count({ where })
+      prisma.payment.count({ where }),
     ]);
 
-    res.json({
+    return res.json({
       payments,
       pagination: {
         total,
-        limit: parseInt(limit),
-        offset: parseInt(offset),
-        hasMore: parseInt(offset) + parseInt(limit) < total
-      }
+        limit: parseInt(limit, 10),
+        offset: parseInt(offset, 10),
+        hasMore: parseInt(offset, 10) + parseInt(limit, 10) < total,
+      },
     });
   } catch (error) {
-    console.error('Error listPayments:', error);
-    res.status(500).json({ error: 'Error al listar pagos', detail: error.message });
+    console.error("Error listPayments:", error);
+    return res.status(500).json({
+      error: "Error al listar pagos",
+      detail: error.message,
+    });
   }
 }
 
@@ -353,9 +522,47 @@ export async function getPayment(req, res) {
   try {
     const { id } = req.params;
 
+    const roles = (req.user?.roles || []).map((r) =>
+      typeof r === "string" ? r.toUpperCase() : String(r?.name || "").toUpperCase()
+    );
+
+    const isAdmin = roles.includes("ADMIN");
+    const isApprover = roles.includes("APPROVER");
+    const isProvider = roles.includes("PROVIDER");
+
     const payment = await prisma.payment.findUnique({
-      where: { id: parseInt(id) },
+      where: { id: parseInt(id, 10) },
       include: {
+        evidences: {
+          where: { isActive: true },
+          select: {
+            id: true,
+            kind: true,
+            fileName: true,
+            createdAt: true,
+            isActive: true,
+            comment: true,
+            bucket: true,
+            path: true,
+            mimeType: true,
+            sizeBytes: true,
+            version: true,
+          },
+        },
+        decidedBy: {
+          select: {
+            id: true,
+            fullName: true,
+            email: true,
+          },
+        },
+        createdBy: {
+          select: {
+            id: true,
+            fullName: true,
+            email: true,
+          },
+        },
         purchaseOrder: {
           select: {
             id: true,
@@ -364,25 +571,679 @@ export async function getPayment(req, res) {
             total: true,
             invoiceUploadedAt: true,
             receivedAt: true,
+            providerId: true,
             provider: {
               select: {
                 id: true,
                 businessName: true,
-                rfc: true
-              }
-            }
-          }
-        }
-      }
+                rfc: true,
+                emailContacto: true,
+              },
+            },
+          },
+        },
+      },
     });
 
     if (!payment) {
-      return res.status(404).json({ error: 'Pago no encontrado' });
+      return res.status(404).json({ error: "Pago no encontrado" });
     }
 
-    res.json(payment);
+    if (isAdmin || isApprover) {
+      return res.json(payment);
+    }
+
+    if (isProvider) {
+      const provider = await prisma.provider.findFirst({
+        where: {
+          emailContacto: req.user?.email,
+          isActive: true,
+          deletedAt: null,
+        },
+        select: { id: true },
+      });
+
+      if (!provider) {
+        return res.status(404).json({ error: "Proveedor no encontrado" });
+      }
+
+      if (payment.purchaseOrder?.providerId !== provider.id) {
+        return res.status(403).json({ error: "No autorizado para ver este pago" });
+      }
+
+      return res.json(payment);
+    }
+
+    return res.status(403).json({ error: "No autorizado" });
   } catch (error) {
-    console.error('Error getPayment:', error);
-    res.status(500).json({ error: 'Error al obtener pago', detail: error.message });
+    console.error("Error getPayment:", error);
+    return res.status(500).json({
+      error: "Error al obtener pago",
+      detail: error.message,
+    });
+  }
+}
+
+/**
+ * Listar pagos para aprobación
+ * GET /api/payments/approval?status=SUBMITTED&search=...&method=TRANSFER
+ * Acceso: ADMIN, APPROVER
+ */
+export async function listPaymentsForApproval(req, res) {
+  try {
+    const {
+      status = "SUBMITTED",
+      search = "",
+      method,
+      limit = 100,
+      offset = 0,
+    } = req.query;
+
+    const where = {};
+
+    if (status) where.status = status;
+    if (method) where.method = method;
+
+    if (search && String(search).trim()) {
+      const q = String(search).trim();
+      where.OR = [
+        { reference: { contains: q, mode: "insensitive" } },
+        { purchaseOrder: { number: { contains: q, mode: "insensitive" } } },
+        {
+          purchaseOrder: {
+            provider: { businessName: { contains: q, mode: "insensitive" } },
+          },
+        },
+        { decidedBy: { fullName: { contains: q, mode: "insensitive" } } },
+      ];
+    }
+
+    const [payments, total] = await Promise.all([
+      prisma.payment.findMany({
+        where,
+        include: {
+          evidences: {
+            where: { isActive: true },
+            select: {
+              id: true,
+              kind: true,
+              fileName: true,
+              createdAt: true,
+              isActive: true,
+              bucket: true,
+              path: true,
+              mimeType: true,
+              sizeBytes: true,
+              version: true,
+            },
+          },
+          decidedBy: { select: { id: true, fullName: true, email: true } },
+          createdBy: { select: { id: true, fullName: true, email: true } },
+          purchaseOrder: {
+            select: {
+              id: true,
+              number: true,
+              total: true,
+              status: true,
+              provider: { select: { id: true, businessName: true, rfc: true } },
+            },
+          },
+        },
+        orderBy: [{ createdAt: "desc" }],
+        take: parseInt(limit, 10),
+        skip: parseInt(offset, 10),
+      }),
+      prisma.payment.count({ where }),
+    ]);
+
+    const paymentsWithUrls = await attachSignedUrlsToPayments(payments);
+
+    res.json({
+      payments: paymentsWithUrls,
+      pagination: {
+        total,
+        limit: parseInt(limit, 10),
+        offset: parseInt(offset, 10),
+        hasMore: parseInt(offset, 10) + parseInt(limit, 10) < total,
+      },
+    });
+  } catch (error) {
+    console.error("Error listPaymentsForApproval:", error);
+    res.status(500).json({
+      error: "Error al listar pagos para aprobación",
+      detail: error.message,
+    });
+  }
+}
+
+/**
+ * Decidir un pago (aprobar/rechazar)
+ * PATCH /api/payments/:id/decision
+ */
+export async function decidePayment(req, res) {
+  try {
+    const { id } = req.params;
+    const { decision, comment, rejectionType, invoiceErrors } = req.body;
+    const userId = req.user?.id;
+
+    if (!decision || !["APPROVE", "REJECT"].includes(decision)) {
+      return res.status(400).json({
+        error: "decision debe ser APPROVE o REJECT",
+      });
+    }
+
+    const trimmedComment = String(comment || "").trim();
+
+    if (decision === "REJECT") {
+      if (!trimmedComment || trimmedComment.length < 10) {
+        return res.status(400).json({
+          error:
+            "El comentario es obligatorio (mín. 10 caracteres) para rechazar.",
+        });
+      }
+
+      if (
+        rejectionType === "INVOICE_ERROR" &&
+        (!Array.isArray(invoiceErrors) || invoiceErrors.length === 0)
+      ) {
+        return res.status(400).json({
+          error:
+            "Debes enviar al menos un error de factura para este tipo de rechazo.",
+        });
+      }
+    }
+
+    const payment = await prisma.payment.findUnique({
+      where: { id: parseInt(id, 10) },
+      include: {
+        purchaseOrder: {
+          select: {
+            id: true,
+            number: true,
+            provider: { select: { businessName: true } },
+          },
+        },
+      },
+    });
+
+    if (!payment) {
+      return res.status(404).json({ error: "Pago no encontrado" });
+    }
+
+    if (payment.status !== "SUBMITTED") {
+      return res.status(409).json({
+        error: "Este pago no está disponible para revisión",
+        currentStatus: payment.status,
+      });
+    }
+
+    const nextStatus = decision === "APPROVE" ? "APPROVED" : "REJECTED";
+
+    const updated = await prisma.payment.update({
+      where: { id: parseInt(id, 10) },
+      data: {
+        status: nextStatus,
+        decidedById: userId,
+        decidedAt: new Date(),
+        decisionComment: trimmedComment || null,
+        rejectionType:
+          decision === "REJECT" ? rejectionType || "GENERAL" : null,
+        invoiceErrorsJson:
+          decision === "REJECT"
+            ? Array.isArray(invoiceErrors)
+              ? invoiceErrors
+              : []
+            : null,
+      },
+      include: {
+        evidences: {
+          where: { isActive: true },
+          select: {
+            id: true,
+            kind: true,
+            fileName: true,
+            createdAt: true,
+            bucket: true,
+            path: true,
+            mimeType: true,
+            sizeBytes: true,
+            version: true,
+          },
+        },
+        decidedBy: { select: { id: true, fullName: true, email: true } },
+        purchaseOrder: {
+          select: {
+            id: true,
+            number: true,
+            total: true,
+            provider: { select: { id: true, businessName: true } },
+          },
+        },
+      },
+    });
+
+    await prisma.auditLog.create({
+      data: {
+        actorId: userId,
+        action: decision === "APPROVE" ? "APPROVE_PAYMENT" : "REJECT_PAYMENT",
+        entity: "Payment",
+        entityId: updated.id,
+        meta: {
+          purchaseOrderNumber: payment.purchaseOrder.number,
+          providerName: payment.purchaseOrder.provider.businessName,
+          decision,
+          comment: trimmedComment || null,
+          rejectionType:
+            decision === "REJECT" ? rejectionType || "GENERAL" : null,
+          invoiceErrors:
+            decision === "REJECT"
+              ? Array.isArray(invoiceErrors)
+                ? invoiceErrors
+                : []
+              : [],
+        },
+      },
+    });
+
+    await logAudit(req, {
+      actorId: userId ?? null,
+      action: decision === "APPROVE" ? "PAYMENT_APPROVE" : "PAYMENT_REJECT",
+      entity: "Payment",
+      entityId: updated.id,
+      meta: {
+        purchaseOrderNumber: payment.purchaseOrder.number,
+        providerName: payment.purchaseOrder.provider.businessName,
+        decision,
+        comment: trimmedComment || null,
+        rejectionType:
+          decision === "REJECT" ? rejectionType || "GENERAL" : null,
+        invoiceErrors:
+          decision === "REJECT"
+            ? Array.isArray(invoiceErrors)
+              ? invoiceErrors
+              : []
+            : [],
+      },
+    });
+
+    const updatedWithUrls = await attachSignedUrlsToPayment(updated);
+
+    if (decision === "APPROVE") {
+      try {
+        const providerName =
+          payment.purchaseOrder?.provider?.businessName || "Proveedor";
+
+        await notifyRoles({
+          roleNames: ["ADMIN"],
+          type: "PAYMENT_APPROVED_ADMIN_ALERT",
+          entityType: "PAYMENT",
+          entityId: updated.id,
+          title: "Pago aprobado",
+          message: `El pago de la orden ${payment.purchaseOrder?.number} del proveedor ${providerName} fue aprobado.`,
+          data: {
+            paymentId: updated.id,
+            purchaseOrderId: payment.purchaseOrder?.id,
+            purchaseOrderNumber: payment.purchaseOrder?.number,
+            providerName,
+          },
+          sendEmail: true,
+        });
+      } catch (e) {
+        console.error("Error notificando a admins por pago aprobado:", e);
+      }
+    }
+
+    res.json({
+      message: decision === "APPROVE" ? "Pago aprobado" : "Pago rechazado",
+      payment: updatedWithUrls,
+    });
+  } catch (error) {
+    console.error("Error decidePayment:", error);
+    res.status(500).json({
+      error: "Error al decidir pago",
+      detail: error.message,
+    });
+  }
+}
+
+/**
+ * Marcar un pago como pagado
+ * PATCH /api/payments/:id/mark-paid
+ */
+export async function markPaymentPaid(req, res) {
+  try {
+    const { id } = req.params;
+    const { note } = req.body;
+    const userId = req.user?.id ?? null;
+
+    const payment = await prisma.payment.findUnique({
+      where: { id: parseInt(id) },
+      include: {
+        purchaseOrder: {
+          select: {
+            id: true,
+            number: true,
+            provider: { select: { id: true, businessName: true } },
+          },
+        },
+      },
+    });
+
+    if (!payment) return res.status(404).json({ error: "Pago no encontrado" });
+
+    if (payment.status !== "APPROVED") {
+      return res.status(409).json({
+        error: "Solo puedes marcar como pagado un pago APPROVED",
+        currentStatus: payment.status,
+      });
+    }
+
+    const updated = await prisma.payment.update({
+      where: { id: parseInt(id) },
+      data: {
+        status: "PAID",
+        reference: note ? String(note).trim().slice(0, 120) : payment.reference,
+      },
+      include: {
+        evidences: {
+          where: { isActive: true },
+          select: {
+            id: true,
+            kind: true,
+            fileName: true,
+            createdAt: true,
+            bucket: true,
+            path: true,
+            mimeType: true,
+            sizeBytes: true,
+            version: true,
+          },
+        },
+        purchaseOrder: {
+          select: {
+            id: true,
+            number: true,
+            total: true,
+            status: true,
+            provider: { select: { id: true, businessName: true, rfc: true } },
+          },
+        },
+      },
+    });
+
+    await prisma.auditLog.create({
+      data: {
+        actorId: userId,
+        action: "MARK_PAYMENT_PAID",
+        entity: "Payment",
+        entityId: updated.id,
+        meta: {
+          purchaseOrderNumber: payment.purchaseOrder.number,
+          providerName: payment.purchaseOrder.provider.businessName,
+          note: note ? String(note).trim() : null,
+        },
+      },
+    });
+
+    await logAudit(req, {
+      actorId: userId,
+      action: "PAYMENT_MARK_PAID",
+      entity: "Payment",
+      entityId: updated.id,
+      meta: {
+        purchaseOrderNumber: payment.purchaseOrder.number,
+        providerName: payment.purchaseOrder.provider.businessName,
+        note: note ? String(note).trim() : null,
+      },
+    });
+
+    const updatedWithUrls = await attachSignedUrlsToPayment(updated);
+
+    return res.json({
+      message: "Pago marcado como pagado",
+      payment: updatedWithUrls,
+    });
+  } catch (error) {
+    console.error("Error markPaymentPaid:", error);
+    return res.status(500).json({
+      error: "Error al marcar pago como pagado",
+      detail: error.message,
+    });
+  }
+}
+
+async function resolveProviderIdFromSession(req) {
+  if (req.user?.providerId) return req.user.providerId;
+  if (req.user?.provider?.id) return req.user.provider.id;
+
+  const email = String(req.user?.email || "")
+    .trim()
+    .toLowerCase();
+  if (!email) return null;
+
+  const provider = await prisma.provider.findFirst({
+    where: {
+      emailContacto: email,
+      isActive: true,
+      deletedAt: null,
+    },
+    select: { id: true },
+  });
+
+  return provider?.id ?? null;
+}
+
+// =========================
+// PROVIDER: Mis parcialidades
+// GET /api/payments/my-plans
+// =========================
+export async function listMyPaymentPlans(req, res) {
+  try {
+    let providerId = req.user?.providerId ?? req.user?.provider?.id ?? null;
+    if (!providerId) {
+      providerId = await resolveProviderIdFromSession(req);
+    }
+
+    if (!providerId) {
+      return res.status(400).json({
+        error: "No se pudo identificar el proveedor del usuario actual.",
+      });
+    }
+
+    const payments = await prisma.payment.findMany({
+      where: {
+        purchaseOrder: {
+          is: {
+            providerId,
+          },
+        },
+      },
+      include: {
+        evidences: {
+          where: { isActive: true },
+          orderBy: [{ kind: "asc" }, { version: "desc" }, { createdAt: "desc" }],
+        },
+        purchaseOrder: {
+          include: {
+            provider: {
+              select: {
+                id: true,
+                businessName: true,
+                rfc: true,
+              },
+            },
+          },
+        },
+      },
+      orderBy: [
+        { purchaseOrderId: "asc" },
+        { installmentNo: "asc" },
+        { createdAt: "asc" },
+      ],
+    });
+
+    const paymentsWithUrls = await attachSignedUrlsToPayments(payments);
+
+    return res.json({ payments: paymentsWithUrls });
+  } catch (error) {
+    console.error("Error listMyPaymentPlans:", error);
+    return res.status(500).json({
+      error: "Error al listar parcialidades del proveedor",
+      detail: error.message,
+    });
+  }
+}
+
+// =========================
+// PROVIDER: Enviar a revisión
+// PATCH /api/payments/:id/submit
+// =========================
+export async function submitPaymentForReview(req, res) {
+  try {
+    const paymentId = Number(req.params.id);
+
+    if (!Number.isFinite(paymentId)) {
+      return res.status(400).json({ error: "ID de pago inválido" });
+    }
+
+    let providerId = req.user?.providerId ?? req.user?.provider?.id ?? null;
+    if (!providerId) {
+      providerId = await resolveProviderIdFromSession(req);
+    }
+
+    if (!providerId) {
+      return res.status(400).json({
+        error: "No se pudo identificar el proveedor del usuario actual.",
+      });
+    }
+
+    const payment = await prisma.payment.findFirst({
+      where: {
+        id: paymentId,
+        purchaseOrder: {
+          is: {
+            providerId,
+          },
+        },
+      },
+      include: {
+        evidences: {
+          where: { isActive: true },
+          select: {
+            id: true,
+            kind: true,
+            fileName: true,
+            bucket: true,
+            path: true,
+            mimeType: true,
+            sizeBytes: true,
+            version: true,
+          },
+        },
+      },
+    });
+
+    if (!payment) {
+      return res.status(404).json({
+        error: "Parcialidad no encontrada para este proveedor.",
+      });
+    }
+
+    if (payment.status !== "PENDING" && payment.status !== "REJECTED") {
+      return res.status(409).json({
+        error:
+          "Solo se pueden enviar a revisión parcialidades en estado PENDING o REJECTED.",
+        currentStatus: payment.status,
+      });
+    }
+
+    const hasPdf = payment.evidences.some(
+      (e) => String(e.kind || "").toUpperCase() === "PDF"
+    );
+    const hasXml = payment.evidences.some(
+      (e) => String(e.kind || "").toUpperCase() === "XML"
+    );
+
+    if (!hasPdf || !hasXml) {
+      return res.status(400).json({
+        error:
+          "Debes subir al menos un PDF y un XML antes de enviar a revisión.",
+      });
+    }
+
+    const updated = await prisma.payment.update({
+      where: { id: paymentId },
+      data: {
+        status: "SUBMITTED",
+        decidedAt: null,
+        decidedById: null,
+        decisionComment: null,
+        rejectionType: null,
+        invoiceErrorsJson: null,
+      },
+      include: {
+        evidences: {
+          where: { isActive: true },
+          select: {
+            id: true,
+            kind: true,
+            fileName: true,
+            bucket: true,
+            path: true,
+            mimeType: true,
+            sizeBytes: true,
+            version: true,
+          },
+        },
+        purchaseOrder: {
+          select: {
+            id: true,
+            number: true,
+            provider: {
+              select: {
+                id: true,
+                businessName: true,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    const updatedWithUrls = await attachSignedUrlsToPayment(updated);
+
+    try {
+      const providerName =
+        updated.purchaseOrder?.provider?.businessName || "Proveedor";
+
+      await notifyRoles({
+        roleNames: ["ADMIN", "APPROVER"],
+        type: "PAYMENT_SUBMITTED",
+        entityType: "PAYMENT",
+        entityId: updated.id,
+        title: "Nuevo pago por revisar",
+        message: `El proveedor ${providerName} subió un pago para la orden ${updated.purchaseOrder?.number} y requiere revisión.`,
+        data: {
+          paymentId: updated.id,
+          purchaseOrderId: updated.purchaseOrder?.id,
+          purchaseOrderNumber: updated.purchaseOrder?.number,
+          providerName,
+        },
+        sendEmail: true,
+      });
+    } catch (e) {
+      console.error("Error notificando roles por pago enviado:", e);
+    }
+
+    return res.json({
+      message: "Parcialidad enviada a revisión",
+      payment: updatedWithUrls,
+    });
+  } catch (error) {
+    console.error("Error submitPaymentForReview:", error);
+    return res.status(500).json({
+      error: "Error al enviar parcialidad a revisión",
+      detail: error.message,
+    });
   }
 }

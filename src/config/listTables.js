@@ -8,7 +8,6 @@ async function main() {
     console.table(rows);
     // comprobar existencia exacta de la tabla que usa Prisma
     const exists = rows.some(r => String(r.table_name).toLowerCase() === 'user' || String(r.table_name) === 'User');
-    console.log('¿User existe (insensitivo a mayúsculas)?:', exists);
   } catch (err) {
     console.error('Error listando tablas:', err);
   } finally {

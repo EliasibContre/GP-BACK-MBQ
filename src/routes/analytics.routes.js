@@ -1,25 +1,46 @@
-import express from 'express';
-import { getPaymentStatusTimings, getDashboardStats, getProviderDashboardStats } from '../controllers/analytics.controller.js';
-import { requireAuth } from '../middlewares/requireAuth.js';
+// src/routes/analytics.routes.js
+import express from "express";
+import {
+  getPaymentStatusTimings,
+  getDashboardStats,
+  getProviderDashboardStats,
+  getApproverDashboardStats,
+  getActivityLog,
+} from "../controllers/analytics.controller.js";
+
+import { requireAuth } from "../middlewares/requireAuth.js";
+import { requireRole } from "../middlewares/requireRole.js";
 
 const router = express.Router();
 
-/**
- * GET /api/analytics/dashboard
- * Obtiene estadísticas generales del dashboard
- */
-router.get('/dashboard', getDashboardStats);
+// Dashboard stats - Admin only
+router.get("/dashboard", requireAuth, requireRole("ADMIN"), getDashboardStats);
 
-/**
- * GET /api/analytics/provider-dashboard
- * Obtiene estadísticas específicas del proveedor autenticado
- */
-router.get('/provider-dashboard', requireAuth, getProviderDashboardStats);
+// Activity log - Admin only
+router.get("/activity", requireAuth, requireRole("ADMIN"), getActivityLog);
 
-/**
- * GET /api/analytics/payment-timings
- * Obtiene tiempos promedio por estado de pago
- */
-router.get('/payment-timings', getPaymentStatusTimings);
+// Payment status timings - Admin only
+router.get(
+  "/payment-timings",
+  requireAuth,
+  requireRole("ADMIN"),
+  getPaymentStatusTimings
+);
+
+// Provider dashboard stats - Provider only
+router.get(
+  "/provider-dashboard",
+  requireAuth,
+  requireRole("PROVIDER"),
+  getProviderDashboardStats
+);
+
+//  Approver dashboard stats - Approver only
+router.get(
+  "/approver-dashboard",
+  requireAuth,
+  requireRole("APPROVER"),
+  getApproverDashboardStats
+);
 
 export default router;

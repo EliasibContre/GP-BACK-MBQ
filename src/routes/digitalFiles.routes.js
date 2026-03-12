@@ -1,32 +1,47 @@
-import { Router } from 'express';
-import { requireAuth } from '../middlewares/requireAuth.js';
-import { requireRole } from '../middlewares/requireRole.js';
+// src/routes/digitalFiles.routes.js
+import { Router } from "express";
+import { requireAuth } from "../middlewares/requireAuth.js";
+import { requireRole } from "../middlewares/requireRole.js";
 import {
   getProviders,
   getProviderDocuments,
   getProviderPurchaseOrders,
+
+  // download
   downloadPurchaseOrder,
   downloadInvoice,
-  downloadInvoiceXml
-} from '../controllers/digitalFiles.controller.js';
+  downloadInvoiceXml,
+
+  // view
+  viewPurchaseOrder,
+  viewInvoice,
+  viewInvoiceXml,
+
+  //  RAW
+  rawInvoiceXml,
+} from "../controllers/digitalFiles.controller.js";
 
 const router = Router();
 
-// Todas las rutas requieren autenticación
+// Todas requieren auth
 router.use(requireAuth);
 
-// Proveedores (solo admin/approver)
-router.get('/providers', requireRole(['admin', 'approver']), getProviders);
+// Admin/Approver
+router.get("/providers", requireRole(["admin", "approver"]), getProviders);
+router.get("/providers/:providerId/documents", requireRole(["admin", "approver"]), getProviderDocuments);
+router.get("/providers/:providerId/purchase-orders", requireRole(["admin", "approver"]), getProviderPurchaseOrders);
 
-// Documentos de un proveedor (solo admin/approver)
-router.get('/providers/:providerId/documents', requireRole(['admin', 'approver']), getProviderDocuments);
+//  VIEW (abre en navegador)
+router.get("/purchase-orders/:orderId/view", viewPurchaseOrder);
+router.get("/purchase-orders/:orderId/invoice/view", viewInvoice);
+router.get("/purchase-orders/:orderId/invoice/xml/view", viewInvoiceXml);
 
-// Órdenes de compra de un proveedor (solo admin/approver)
-router.get('/providers/:providerId/purchase-orders', requireRole(['admin', 'approver']), getProviderPurchaseOrders);
+//  RAW (NO REDIRECT) -> para visor bonito en front
+router.get("/purchase-orders/:orderId/invoice/xml/raw", rawInvoiceXml);
 
-// Descargar PDFs (accesible para todos los usuarios autenticados)
-router.get('/purchase-orders/:orderId/download', downloadPurchaseOrder);
-router.get('/purchase-orders/:orderId/invoice/download', downloadInvoice);
-router.get('/purchase-orders/:orderId/invoice/xml', downloadInvoiceXml);
+//  DOWNLOAD (descarga directo)
+router.get("/purchase-orders/:orderId/download", downloadPurchaseOrder);
+router.get("/purchase-orders/:orderId/invoice/download", downloadInvoice);
+router.get("/purchase-orders/:orderId/invoice/xml/download", downloadInvoiceXml); //  FIX
 
 export default router;
